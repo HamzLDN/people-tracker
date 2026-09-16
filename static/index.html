@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>People Tracker</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <main>
+        <section class="stage-wrap">
+          <div class="stage" id="stage">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="overlay"></canvas>
+            <div class="follow-popup" id="followPopup" hidden>
+              <div class="follow-popup-head" id="followPopupHead">
+                <span class="follow-popup-title" id="followPopupLabel">Person</span>
+                <button type="button" class="follow-popup-close" id="followPopupClose" aria-label="Close follow view">
+                  ×
+                </button>
+              </div>
+              <canvas id="followPopupCanvas" aria-label="Follow zoom"></canvas>
+            </div>
+            <div class="empty" id="empty">
+              <p>Start the camera, or open a video. Boxes are drawn on the people in frame.</p>
+              <div class="empty-actions">
+                <button type="button" class="primary" id="cameraBtnEmpty">Use camera</button>
+                <label class="btn">
+                  Open video
+                  <input id="fileEmpty" type="file" accept="video/*" hidden />
+                </label>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="sidebar">
+          <table class="hud" id="hud" aria-label="Live stats" hidden>
+            <thead>
+              <tr>
+                <th scope="col">People</th>
+                <th scope="col">Detect</th>
+                <th scope="col">FPS</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td id="peopleStat">0 people</td>
+                <td id="detectStat">— ms</td>
+                <td id="fpsStat">— fps</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="sidebar-controls" id="sidebarControls" hidden>
+            <div class="row">
+              <button type="button" class="primary" id="cameraBtn">Use camera</button>
+              <label class="btn">
+                Open video
+                <input id="file" type="file" accept="video/*" hidden />
+              </label>
+            </div>
+            <label class="check">
+              <input id="mirror" type="checkbox" checked />
+              Mirror camera
+            </label>
+            <p class="hint error" id="sourceError" hidden></p>
+          </div>
+
+          <div class="tabs" id="sidebarTabs" role="tablist" aria-label="Sidebar panels" hidden>
+            <button type="button" class="tab active" id="tabSource" role="tab" aria-selected="true" aria-controls="panelSource">
+              Source
+            </button>
+            <button type="button" class="tab" id="tabMetrics" role="tab" aria-selected="false" aria-controls="panelMetrics">
+              Metrics
+            </button>
+          </div>
+
+          <div class="sidebar-body">
+            <div class="panel" id="panelSource" role="tabpanel" aria-labelledby="tabSource">
+              <section class="source-panel">
+                <div class="zones-toolbar">
+                  <button type="button" class="btn zone-mode-btn" id="zoneModeBtn">Draw zone</button>
+                  <button type="button" class="btn" id="zoneClearBtn" disabled>Clear all</button>
+                </div>
+                <p class="panel-hint" id="zoneHint">
+                  Turn on <strong>Draw zone</strong>, drag on the video, then <strong>Rename</strong> each area.
+                  Pick zones under Metrics after you draw them here.
+                </p>
+                <ul class="zone-list" id="zoneList" aria-label="Count zones"></ul>
+                <p class="panel-hint">
+                  Click someone in the video to open a draggable follow window on the feed (stays on this tab).
+                </p>
+              </section>
+            </div>
+
+            <div class="panel" id="panelMetrics" role="tabpanel" aria-labelledby="tabMetrics" hidden>
+              <section class="metrics">
+                <section class="metrics-pick-step" id="metricsPickStep" aria-label="Choose zones">
+                  <p class="panel-hint" id="zoneMetricsHint">
+                    Tap each zone to include it. Then press <strong>Next</strong>.
+                  </p>
+                  <p class="zone-metrics-prompt" id="zoneMetricsPrompt" hidden></p>
+                  <div class="zone-pick-list" id="zoneMetricsMenu" role="listbox" aria-label="Zones to include"></div>
+                  <button type="button" class="btn primary zone-metrics-next" id="zoneMetricsNext" disabled>
+                    Next
+                  </button>
+                </section>
+
+                <div class="metrics-main-step" id="metricsMainStep" hidden>
+                  <div class="metrics-scope-bar">
+                    <span class="metrics-scope-label" id="metricsScopeLabel">—</span>
+                    <button type="button" class="btn metrics-change-scope" id="metricsChangeScope">Change</button>
+                  </div>
+
+                <div class="metrics-subtabs" role="tablist" aria-label="Metric views">
+                  <button type="button" class="metrics-subtab active" data-metric="overview">Overview</button>
+                  <button type="button" class="metrics-subtab" data-metric="crowd">Crowd</button>
+                  <button type="button" class="metrics-subtab" data-metric="traffic">Traffic</button>
+                  <button type="button" class="metrics-subtab" data-metric="zones">Zones</button>
+                </div>
+
+                <div class="metric-view active" id="metricOverview" data-metric="overview">
+                  <p class="metrics-summary" id="metricsSummary">
+                    People in frame over time. Run the video for a few seconds to fill the charts.
+                  </p>
+                  <div class="metrics-chart-wrap metrics-chart-main">
+                    <span class="metrics-y-label">People in frame</span>
+                    <canvas id="metricsChart" aria-label="People in frame over time"></canvas>
+                    <p class="chart-empty" id="metricsChartEmpty">Waiting for samples…</p>
+                  </div>
+                  <dl class="metrics-facts">
+                    <div class="metrics-fact-full">
+                      <dt>Most populated area</dt>
+                      <dd id="metricsBusiestArea">—</dd>
+                    </div>
+                    <div class="metrics-fact-full">
+                      <dt>Busiest at</dt>
+                      <dd id="metricsBusiest">—</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                <div class="metric-view" id="metricCrowd" data-metric="crowd" hidden>
+                  <div class="stat-row">
+                    <div class="stat-pill">
+                      <span class="stat-pill-label">Unique seen</span>
+                      <strong id="statUnique">—</strong>
+                    </div>
+                    <div class="stat-pill">
+                      <span class="stat-pill-label">Avg in frame</span>
+                      <strong id="statAvg">—</strong>
+                    </div>
+                  </div>
+                  <div class="metrics-mini metrics-mini-block">
+                    <span class="metrics-mini-label">New arrivals (30s buckets)</span>
+                    <canvas id="metricsEntries"></canvas>
+                    <p class="chart-empty" id="metricsEntriesEmpty">New IDs appear here as people enter the scene.</p>
+                  </div>
+                  <div class="metrics-mini metrics-mini-block">
+                    <span class="metrics-mini-label">Time in frame</span>
+                    <canvas id="metricsDwell"></canvas>
+                    <p class="chart-empty" id="metricsDwellEmpty">Counts how long each person stayed visible.</p>
+                  </div>
+                </div>
+
+                <div class="metric-view" id="metricTraffic" data-metric="traffic" hidden>
+                  <p class="panel-hint">Where people spend time — ranked zones and frame heatmap.</p>
+                  <dl class="metrics-facts">
+                    <div class="metrics-fact-full">
+                      <dt>Busiest area</dt>
+                      <dd id="trafficBusiestArea">—</dd>
+                    </div>
+                  </dl>
+                  <label class="check metrics-video-toggle">
+                    <input id="showPopulatedArea" type="checkbox" />
+                    Show traffic heatmap on video (time average)
+                  </label>
+                  <ol class="zone-rank-list" id="trafficZoneRank" aria-label="Zones by population"></ol>
+                  <div class="metrics-mini metrics-mini-block metrics-heat-block">
+                    <span class="metrics-mini-label">Foot traffic heatmap</span>
+                    <canvas id="metricsHeat"></canvas>
+                    <p class="chart-empty" id="metricsHeatEmpty">Walk the camera across the scene to build the map.</p>
+                  </div>
+                </div>
+
+                <div class="metric-view" id="metricZones" data-metric="zones" hidden>
+                  <p class="panel-hint">Compare drawn zones — live counts, averages, and entries.</p>
+                  <div class="stat-row">
+                    <div class="stat-pill">
+                      <span class="stat-pill-label">In scope</span>
+                      <strong id="statZoneCount">—</strong>
+                    </div>
+                    <div class="stat-pill">
+                      <span class="stat-pill-label">Top avg</span>
+                      <strong id="statZoneLeader">—</strong>
+                    </div>
+                  </div>
+                  <div class="metrics-mini metrics-mini-block metrics-zones-block">
+                    <span class="metrics-mini-label">Average people by zone</span>
+                    <canvas id="metricsZonesChart"></canvas>
+                    <p class="chart-empty" id="metricsZonesEmpty">Draw zones on Source, then run the video to fill this chart.</p>
+                  </div>
+                  <ol class="zone-rank-list zone-metrics-detail" id="zonesMetricsList" aria-label="Zone details"></ol>
+                </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </aside>
+      </main>
+    </div>
+    <script src="/app.js?v=20"></script>
+  </body>
+</html>
