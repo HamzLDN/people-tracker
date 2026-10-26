@@ -41,7 +41,7 @@ The legacy vanilla UI remains in `static/` as a fallback until you run `npm run 
 
 ## MOT17 benchmark video (optional)
 
-To try the tracker on a standard **multi-object tracking** pedestrian dataset (same kind of technology MOT papers use), download **MOT17** frames or video — not precomputed `det.txt` files alone. The app needs **pixels** (**Open video** → `.mp4` or frames in `img1/`).
+To try the tracker on a standard **multi-object tracking** pedestrian dataset (same kind of technology MOT papers use), download **MOT17** video or frames, not precomputed `det.txt` files alone. The app needs **pixels**: use **Open video** with an `.mp4` (or another video file the browser can play).
 
 The [MOTChallenge website](https://motchallenge.net/) may show an offline notice; the **dataset archives still download** from the published URLs.
 
@@ -50,15 +50,9 @@ The [MOTChallenge website](https://motchallenge.net/) may show an offline notice
 | **Full MOT17** (train + test, frames + labels) | [https://motchallenge.net/data/MOT17.zip](https://motchallenge.net/data/MOT17.zip) (~5.5 GB) |
 | **Train frames only** (mirror) | [https://storage.googleapis.com/com-roboflow-marketing/trackers/datasets/mot17-v1/mot17-train-frames.zip](https://storage.googleapis.com/com-roboflow-marketing/trackers/datasets/mot17-v1/mot17-train-frames.zip) |
 
-After unzip, pick one detector variant of a sequence (e.g. **`train/MOT17-05-SDP/`** — same video as `-DPM` / `-FRCNN`, different bundled detections). Use **`img1/*.jpg`**. Example mp4:
+After unzip, pick one detector variant of a sequence (e.g. **`train/MOT17-05-SDP/`**; same video as `DPM` / `FRCNN`, different bundled detections). MOT17 is **CC BY-NC-SA 3.0** (non-commercial; see the MOTChallenge license notice).
 
-```bash
-ffmpeg -framerate 14 -i img1/%06d.jpg -c:v libx264 -pix_fmt yuv420p MOT17-05.mp4
-```
-
-Use the frame rate from `seqinfo.ini` in that folder if it differs. MOT17 is **CC BY-NC-SA 3.0** (non-commercial; see the MOTChallenge license notice).
-
-Some Hugging Face mirrors (e.g. [Morrison1025/MOT17](https://huggingface.co/datasets/Morrison1025/MOT17)) only host **`det/det.txt`** — useful for offline benchmarks, **not** for opening video in this app.
+Some Hugging Face mirrors (e.g. [Morrison1025/MOT17](https://huggingface.co/datasets/Morrison1025/MOT17)) only host **`det/det.txt`**, useful for offline benchmarks, not for opening video in this app.
 
 ## Recent sessions
 
@@ -68,6 +62,6 @@ Uploaded videos are kept in **IndexedDB** so they can replay without choosing th
 
 ## Session snapshot
 
-**Walk** (Metrics) builds an experimental **movement signature** from each person’s path and pace, and flags when someone **returns with a similar walk** to an earlier track in the same session. This is not facial ID — treat it as a demo only.
+**Walk** (Metrics) builds an experimental **movement signature** from each person’s path and pace, and flags when someone **returns with a similar walk** to an earlier track in the same session. This is not facial ID; treat it as a demo only.
 
-On **Metrics**, press **Session snapshot** after the feed has run for a few seconds. You get a full-page **insights** view: peak crowd, dwell, zone comparison, traffic heatmap, written takeaways, and **Export JSON** for your own analysis. **← Back to tracker** returns to the live app. The snapshot is kept in **sessionStorage** for this browser tab, so refreshing the insights page does not clear it.
+On **Metrics**, press **Session snapshot** after the feed has run for a few seconds. You get a full-page **insights** view: peak crowd, dwell, zone comparison, traffic heatmap, written takeaways, and **Export JSON** for your own analysis. **Back to tracker** returns to the live app. The snapshot is kept in **sessionStorage** for this browser tab, so refreshing the insights page does not clear it.
