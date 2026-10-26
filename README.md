@@ -39,6 +39,27 @@ Open `http://127.0.0.1:8000`.
 
 The legacy vanilla UI remains in `static/` as a fallback until you run `npm run build`.
 
+## MOT17 benchmark video (optional)
+
+To try the tracker on a standard **multi-object tracking** pedestrian dataset (same kind of technology MOT papers use), download **MOT17** frames or video — not precomputed `det.txt` files alone. The app needs **pixels** (**Open video** → `.mp4` or frames in `img1/`).
+
+The [MOTChallenge website](https://motchallenge.net/) may show an offline notice; the **dataset archives still download** from the published URLs.
+
+| What | URL |
+|------|-----|
+| **Full MOT17** (train + test, frames + labels) | [https://motchallenge.net/data/MOT17.zip](https://motchallenge.net/data/MOT17.zip) (~5.5 GB) |
+| **Train frames only** (mirror) | [https://storage.googleapis.com/com-roboflow-marketing/trackers/datasets/mot17-v1/mot17-train-frames.zip](https://storage.googleapis.com/com-roboflow-marketing/trackers/datasets/mot17-v1/mot17-train-frames.zip) |
+
+After unzip, pick one detector variant of a sequence (e.g. **`train/MOT17-05-SDP/`** — same video as `-DPM` / `-FRCNN`, different bundled detections). Use **`img1/*.jpg`**. Example mp4:
+
+```bash
+ffmpeg -framerate 14 -i img1/%06d.jpg -c:v libx264 -pix_fmt yuv420p MOT17-05.mp4
+```
+
+Use the frame rate from `seqinfo.ini` in that folder if it differs. MOT17 is **CC BY-NC-SA 3.0** (non-commercial; see the MOTChallenge license notice).
+
+Some Hugging Face mirrors (e.g. [Morrison1025/MOT17](https://huggingface.co/datasets/Morrison1025/MOT17)) only host **`det/det.txt`** — useful for offline benchmarks, **not** for opening video in this app.
+
 ## Recent sessions
 
 On the **Source** tab, choose a session under **Select session** and press **Use** to load camera or video plus zones and settings.
