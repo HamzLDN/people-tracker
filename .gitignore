@@ -7,3 +7,7 @@ __pycache__/
 *.pt
 runs/
 output/
+frontend/public/samples/*.mp4
+frontend/public/samples/**/*.mp4
+!frontend/public/samples/mot17-manifest.json
+!frontend/public/samples/casia-b-manifest.json

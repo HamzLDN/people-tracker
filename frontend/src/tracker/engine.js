@@ -17,12 +17,7 @@ let video;
 let overlay;
 let stage;
 let empty;
-let hud;
-let peopleStat;
-let detectStat;
-let fpsStat;
 let sourceError;
-let sidebarControls;
 let cameraBtn;
 let cameraBtnEmpty;
 let fileInput;
@@ -52,6 +47,7 @@ let metricsBusiestArea;
 let trafficBusiestArea;
 let trafficZoneRank;
 let showPopulatedAreaInput;
+let menuDockBottomInput;
 let metricsEntries;
 let metricsDwell;
 let metricsZonesChart;
@@ -85,6 +81,15 @@ let metricsScopeLabel;
 let metricsChangeScope;
 let zoneMetricsNext;
 let savedProfileSelect;
+let mot17SampleSelect;
+let useMot17SampleBtn;
+let mot17SampleHint;
+let casiaBSampleSelect;
+let useCasiaBSampleBtn;
+let casiaBSampleHint;
+let activeSourceLine;
+let mot17Sequences = [];
+let casiaBSequences = [];
 let useRecentSessionBtn;
 let openSnapshotBtn;
 let gaitTrackList;
@@ -109,12 +114,7 @@ function bindDom() {
   overlay = document.getElementById("overlay");
   stage = document.getElementById("stage");
   empty = document.getElementById("empty");
-  hud = document.getElementById("hud");
-  peopleStat = document.getElementById("peopleStat");
-  detectStat = document.getElementById("detectStat");
-  fpsStat = document.getElementById("fpsStat");
   sourceError = document.getElementById("sourceError");
-  sidebarControls = document.getElementById("sidebarControls");
   cameraBtn = document.getElementById("cameraBtn");
   cameraBtnEmpty = document.getElementById("cameraBtnEmpty");
   fileInput = document.getElementById("file");
@@ -144,6 +144,7 @@ function bindDom() {
   trafficBusiestArea = document.getElementById("trafficBusiestArea");
   trafficZoneRank = document.getElementById("trafficZoneRank");
   showPopulatedAreaInput = document.getElementById("showPopulatedArea");
+  menuDockBottomInput = document.getElementById("menuDockBottom");
   metricsEntries = document.getElementById("metricsEntries");
   metricsDwell = document.getElementById("metricsDwell");
   metricsZonesChart = document.getElementById("metricsZonesChart");
@@ -177,6 +178,13 @@ function bindDom() {
   metricsChangeScope = document.getElementById("metricsChangeScope");
   zoneMetricsNext = document.getElementById("zoneMetricsNext");
   savedProfileSelect = document.getElementById("savedProfileSelect");
+  mot17SampleSelect = document.getElementById("mot17SampleSelect");
+  useMot17SampleBtn = document.getElementById("useMot17Sample");
+  mot17SampleHint = document.getElementById("mot17SampleHint");
+  casiaBSampleSelect = document.getElementById("casiaBSampleSelect");
+  useCasiaBSampleBtn = document.getElementById("useCasiaBSample");
+  casiaBSampleHint = document.getElementById("casiaBSampleHint");
+  activeSourceLine = document.getElementById("activeSourceLine");
   useRecentSessionBtn = document.getElementById("useRecentSession");
   openSnapshotBtn = document.getElementById("openSnapshot");
   gaitTrackList = document.getElementById("gaitTrackList");
@@ -221,6 +229,9 @@ const state = {
   objectUrl: null,
   sourceKind: null,
   sourceLabel: "",
+  mot17Benchmark: false,
+  casiaBenchmark: false,
+  casiaSubjectId: null,
   videoId: null,
   sessionRecentId: null,
   stream: null,
@@ -247,6 +258,7 @@ const state = {
   metricsNavStep: "menu",
   metricsActiveView: null,
   showPopulatedAreaOnVideo: false,
+  menuDockBottom: false,
   followPopupX: null,
   followPopupY: null,
   gait: createGaitState(),
@@ -277,9 +289,7 @@ function clamp(value, low, high) {
 }
 
 function setPlaybackUi(active) {
-  hud.hidden = !active;
   empty.hidden = active;
-  sidebarControls.hidden = !active;
   sidebarTabs.hidden = !active;
   if (!active) {
     selectTab("source");
@@ -311,6 +321,7 @@ function settingsPayload() {
     v: 1,
     mirror: state.mirror,
     showPopulatedAreaOnVideo: state.showPopulatedAreaOnVideo,
+    menuDockBottom: state.menuDockBottom,
     confidence: state.confidence,
     smoothing: state.smoothing,
     zoneNextId: state.zoneNextId,
@@ -575,6 +586,11 @@ function applyProfileData(data, pick) {
   if (pick.heatmap && typeof data.showPopulatedAreaOnVideo === "boolean") {
     state.showPopulatedAreaOnVideo = data.showPopulatedAreaOnVideo;
     if (showPopulatedAreaInput) showPopulatedAreaInput.checked = data.showPopulatedAreaOnVideo;
+  }
+  if (typeof data.menuDockBottom === "boolean") {
+    state.menuDockBottom = data.menuDockBottom;
+    if (menuDockBottomInput) menuDockBottomInput.checked = data.menuDockBottom;
+    applyMenuDock();
   }
   if (typeof data.confidence === "number") state.confidence = clamp(data.confidence, 0.15, 0.9);
   if (typeof data.smoothing === "number") state.smoothing = clamp(data.smoothing, 0, 1);
@@ -1119,7 +1135,14 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
   if (history.length < 2) return;
 
   const series = [...history].sort((a, b) => a.t - b.t);
-  const pad = { l: 34, r: 8, t: 8, b: 22 };
+  const cssWidth = canvas.clientWidth || canvas.parentElement?.clientWidth || 0;
+  const scale = cssWidth > 0 ? width / cssWidth : 1;
+  const pad = {
+    l: Math.round(40 * scale),
+    r: Math.round(14 * scale),
+    t: Math.round(12 * scale),
+    b: Math.round(26 * scale),
+  };
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
   const t0 = series[0].t;
@@ -1134,7 +1157,7 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
   const xAt = (t) => pad.l + ((t - t0) / span) * plotW;
   const yAt = (count) => pad.t + plotH - (count / yMax) * plotH;
 
-  const fontSize = Math.max(10, width * 0.028);
+  const fontSize = Math.round(12 * scale);
   ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillStyle = "rgba(163, 158, 145, 0.9)";
   ctx.textAlign = "right";
@@ -1172,7 +1195,7 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
     else ctx.lineTo(x, y);
   });
   ctx.strokeStyle = strokeColor;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = Math.max(2, 2 * scale);
   ctx.stroke();
 
   const markerTime = analysis?.peakTime ?? analysis?.rampTime;
@@ -1389,8 +1412,7 @@ function showMetricsMainStep() {
   state.metricsScopeStep = "main";
   if (metricsPickStep) metricsPickStep.hidden = true;
   if (metricsMainStep) metricsMainStep.hidden = false;
-  updateMetricsScopeLabel();
-  showMetricsMenu();
+  showMetricsDetail("overview");
   refreshMetrics();
 }
 
@@ -1845,8 +1867,7 @@ function refreshMetrics() {
     const peakLabel =
       analysis.peakCount === 1 ? "1 person" : `${Math.round(analysis.peakCount)} people`;
     metricsBusiest.textContent = `${peakLabel} at ${formatClock(analysis.peakTime)}`;
-    const scope = zoneMetricsSelectionTitle();
-    metricsSummary.textContent = `Live counts for “${scope}”.`;
+    metricsSummary.textContent = "";
   } else {
     metricsSummary.textContent = "Counting… keep the video running.";
     metricsBusiest.textContent = "—";
@@ -1869,6 +1890,11 @@ function refreshMetrics() {
   refreshGaitPanel();
 }
 
+function chartScale(canvas) {
+  const cssWidth = canvas.clientWidth || canvas.parentElement?.clientWidth || 0;
+  return cssWidth > 0 ? canvas.width / cssWidth : 1;
+}
+
 function fitCanvas(canvas, ctx, cssHeight = 92) {
   const wrap = canvas.parentElement;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1882,8 +1908,10 @@ function fitCanvas(canvas, ctx, cssHeight = 92) {
 }
 
 function drawEntryChart() {
-  fitCanvas(metricsEntries, metricsEntryCtx);
+  if (!metricsEntries || !metricsEntryCtx) return;
+  resizeChartCanvas(metricsEntries, metricsEntries.parentElement);
   const { width, height } = metricsEntries;
+  const scale = chartScale(metricsEntries);
   metricsEntryCtx.clearRect(0, 0, width, height);
   const entryTimes = scopedEntryTimes();
   if (!entryTimes.length) return;
@@ -1896,11 +1924,16 @@ function drawEntryChart() {
   const keys = [...bucketMap.keys()].sort((a, b) => a - b);
   const values = keys.map((k) => bucketMap.get(k));
   const maxVal = Math.max(1, ...values);
-  const pad = { l: 28, r: 6, t: 16, b: 18 };
+  const pad = {
+    l: Math.round(8 * scale),
+    r: Math.round(8 * scale),
+    t: Math.round(16 * scale),
+    b: Math.round(20 * scale),
+  };
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
   const barW = plotW / keys.length;
-  const countFont = `${Math.max(9, width * 0.032)}px ui-sans-serif, system-ui, sans-serif`;
+  const countFont = `${Math.round(12 * scale)}px ui-sans-serif, system-ui, sans-serif`;
 
   keys.forEach((key, i) => {
     const val = values[i];
@@ -1918,7 +1951,7 @@ function drawEntryChart() {
   });
 
   metricsEntryCtx.fillStyle = "rgba(163, 158, 145, 0.9)";
-  metricsEntryCtx.font = `${Math.max(9, width * 0.03)}px ui-sans-serif, system-ui, sans-serif`;
+  metricsEntryCtx.font = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
   metricsEntryCtx.textAlign = "center";
   metricsEntryCtx.textBaseline = "alphabetic";
   keys.forEach((key, i) => {
@@ -1929,8 +1962,10 @@ function drawEntryChart() {
 }
 
 function drawDwellChart() {
-  fitCanvas(metricsDwell, metricsDwellCtx);
+  if (!metricsDwell || !metricsDwellCtx) return;
+  resizeChartCanvas(metricsDwell, metricsDwell.parentElement);
   const { width, height } = metricsDwell;
+  const scale = chartScale(metricsDwell);
   metricsDwellCtx.clearRect(0, 0, width, height);
 
   const counts = DWELL_BINS.map(() => 0);
@@ -1952,11 +1987,16 @@ function drawDwellChart() {
   if (!total) return;
 
   const maxVal = Math.max(1, ...counts);
-  const pad = { l: 6, r: 6, t: 16, b: 22 };
+  const pad = {
+    l: Math.round(8 * scale),
+    r: Math.round(8 * scale),
+    t: Math.round(16 * scale),
+    b: Math.round(22 * scale),
+  };
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
   const barW = plotW / counts.length;
-  const countFont = `${Math.max(9, width * 0.032)}px ui-sans-serif, system-ui, sans-serif`;
+  const countFont = `${Math.round(12 * scale)}px ui-sans-serif, system-ui, sans-serif`;
 
   counts.forEach((val, i) => {
     const bh = val > 0 ? (val / maxVal) * plotH : 0;
@@ -1976,7 +2016,7 @@ function drawDwellChart() {
   });
 
   metricsDwellCtx.fillStyle = "rgba(163, 158, 145, 0.85)";
-  metricsDwellCtx.font = `${Math.max(8, width * 0.028)}px ui-sans-serif, system-ui, sans-serif`;
+  metricsDwellCtx.font = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
   metricsDwellCtx.textAlign = "center";
   metricsDwellCtx.textBaseline = "alphabetic";
   DWELL_BINS.forEach((bin, i) => {
@@ -1987,7 +2027,7 @@ function drawDwellChart() {
 
 function drawZonesCompareChart() {
   if (!metricsZonesChart || !metricsZonesCtx) return;
-  fitCanvas(metricsZonesChart, metricsZonesCtx, 120);
+  resizeChartCanvas(metricsZonesChart, metricsZonesChart.parentElement);
   const { width, height } = metricsZonesChart;
   metricsZonesCtx.clearRect(0, 0, width, height);
 
@@ -2004,32 +2044,22 @@ function drawZonesCompareChart() {
   const hasData = rows.some((r) => r.avg > 0);
   if (!hasData) return;
 
-  const pad = { l: 8, r: 36, t: 8, b: 8 };
+  const pad = { l: 12, r: 48, t: 10, b: 10 };
   const rowH = (height - pad.t - pad.b) / rows.length;
-  const barH = Math.max(10, rowH * 0.55);
-  const labelW = Math.min(width * 0.34, 108);
+  const barH = Math.max(4, rowH * 0.62);
+  const plotW = width - pad.l - pad.r;
 
   rows.forEach((row, i) => {
     const y = pad.t + i * rowH + (rowH - barH) / 2;
-    const barMaxW = width - pad.l - pad.r - labelW - 8;
-    const barW = (row.avg / maxAvg) * barMaxW;
-    const color = zoneColor(row.zone);
-
-    metricsZonesCtx.font = `${Math.max(9, rowH * 0.38)}px ui-sans-serif, system-ui, sans-serif`;
-    metricsZonesCtx.fillStyle = "rgba(244, 241, 232, 0.88)";
+    const barW = Math.max(2, (row.avg / maxAvg) * plotW);
+    metricsZonesCtx.fillStyle = rgbaFromHex(zoneColor(row.zone), 0.9);
+    metricsZonesCtx.fillRect(pad.l, y, barW, barH);
+    metricsZonesCtx.fillStyle = "rgba(244, 241, 232, 0.92)";
+    const scale = chartScale(metricsZonesChart);
+    metricsZonesCtx.font = `${Math.round(12 * scale)}px ui-sans-serif, system-ui, sans-serif`;
     metricsZonesCtx.textAlign = "left";
     metricsZonesCtx.textBaseline = "middle";
-    const name =
-      row.zone.name.length > 14 ? `${row.zone.name.slice(0, 13)}…` : row.zone.name;
-    metricsZonesCtx.fillText(name, pad.l, y + barH / 2);
-
-    const bx = pad.l + labelW;
-    metricsZonesCtx.fillStyle = rgbaFromHex(color, 0.88);
-    metricsZonesCtx.fillRect(bx, y, Math.max(2, barW), barH);
-
-    metricsZonesCtx.fillStyle = "rgba(244, 241, 232, 0.92)";
-    metricsZonesCtx.textAlign = "left";
-    metricsZonesCtx.fillText(row.avg.toFixed(1), bx + barW + 6, y + barH / 2);
+    metricsZonesCtx.fillText(row.avg.toFixed(1), pad.l + barW + 8, y + barH / 2);
   });
 }
 
@@ -2156,7 +2186,8 @@ function refreshGaitPanel() {
 }
 
 function drawHeatChart() {
-  fitCanvas(metricsHeat, metricsHeatCtx, 120);
+  if (!metricsHeat || !metricsHeatCtx) return;
+  resizeChartCanvas(metricsHeat, metricsHeat.parentElement);
   const { width, height } = metricsHeat;
   metricsHeatCtx.clearRect(0, 0, width, height);
 
@@ -2219,21 +2250,20 @@ function selectTab(tab) {
   panelSource.hidden = !source;
   panelMetrics.hidden = source;
   if (!source) {
-    if (state.metricsScopeStep === "pick") {
-      showMetricsPickStep();
+    if (state.zones.length && !state.metricsSelectedZoneIds.length) {
+      state.metricsSelectedZoneIds = state.zones.map((zone) => zone.id);
+      applyMetricsZoneSelection();
+    }
+    if (state.metricsScopeStep === "pick" || !metricsMainStep || metricsMainStep.hidden) {
+      showMetricsMainStep();
       return;
     }
-    if (metricsMainStep && !metricsMainStep.hidden) {
-      updateMetricsScopeLabel();
-      if (state.metricsNavStep === "detail" && state.metricsActiveView) {
-        showMetricsDetail(state.metricsActiveView);
-      } else {
-        showMetricsMenu();
-      }
-      refreshMetrics();
-      return;
+    if (state.metricsNavStep === "detail" && state.metricsActiveView) {
+      showMetricsDetail(state.metricsActiveView);
+    } else {
+      showMetricsDetail("overview");
     }
-    showMetricsMainStep();
+    refreshMetrics();
   }
 }
 
@@ -2819,9 +2849,8 @@ function ingestTracks(tracks, now) {
     const current = state.tracks.get(track.id);
     if (!current) {
       const placed = placeBox(track.x, track.y, track.w, track.h);
-      state.trails.set(track.id, [
-        { x: placed.x + placed.w / 2, y: placed.y + placed.h / 2 },
-      ]);
+      const anchor = trailAnchor(placed);
+      state.trails.set(track.id, [{ x: anchor.x, y: anchor.y }]);
       state.tracks.set(track.id, {
         score: track.score,
         held: track.held,
@@ -2996,38 +3025,85 @@ function drawLabel(rect, geom, id, color) {
   ctx.restore();
 }
 
+function trailAnchor(box) {
+  return { x: box.x + box.w / 2, y: box.y + box.h * 0.86 };
+}
+
 function rememberTrail(id, box) {
-  const cx = box.x + box.w / 2;
-  const cy = box.y + box.h / 2;
+  const raw = trailAnchor(box);
   const history = state.trails.get(id) || [];
+  if (history.sx == null) {
+    history.sx = raw.x;
+    history.sy = raw.y;
+  } else {
+    const k = 0.22;
+    history.sx += (raw.x - history.sx) * k;
+    history.sy += (raw.y - history.sy) * k;
+  }
   const last = history[history.length - 1];
-  if (!last || Math.hypot(cx - last.x, cy - last.y) > 0.0025) {
-    history.push({ x: cx, y: cy });
+  if (!last || Math.hypot(history.sx - last.x, history.sy - last.y) > 0.006) {
+    history.push({ x: history.sx, y: history.sy });
+    if (history.length > 320) history.shift();
     state.trails.set(id, history);
   }
+}
+
+function chaikin(points) {
+  if (points.length < 3) return points;
+  const next = [points[0]];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    next.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 });
+    next.push({ x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 });
+  }
+  next.push(points[points.length - 1]);
+  return next;
+}
+
+function strokeSmoothPath(points) {
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  if (points.length === 2) {
+    ctx.lineTo(points[1].x, points[1].y);
+    ctx.stroke();
+    return;
+  }
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const midX = (points[i].x + points[i + 1].x) / 2;
+    const midY = (points[i].y + points[i + 1].y) / 2;
+    ctx.quadraticCurveTo(points[i].x, points[i].y, midX, midY);
+  }
+  const last = points[points.length - 1];
+  ctx.lineTo(last.x, last.y);
+  ctx.stroke();
 }
 
 function drawTrail(rect, id, history, box, color = TRACK_COLOR) {
   if (!history || history.length < 2) return;
   const dpr = overlay.width / Math.max(stage.clientWidth, 1);
+  const points = history.map((point) => ({
+    x: mapX(point.x, 0, rect),
+    y: rect.y + point.y * rect.h,
+  }));
+  if (box) {
+    const anchor = trailAnchor(box);
+    points.push({
+      x: mapX(anchor.x, 0, rect),
+      y: rect.y + anchor.y * rect.h,
+    });
+  }
+  const smooth = chaikin(chaikin(points));
   ctx.save();
-  ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.7;
-  ctx.lineWidth = 2.25 * dpr;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  ctx.beginPath();
-  history.forEach((point, index) => {
-    const x = mapX(point.x, 0, rect);
-    const y = rect.y + point.y * rect.h;
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  if (box) {
-    const cx = box.x + box.w / 2;
-    ctx.lineTo(mapX(cx, 0, rect), rect.y + (box.y + box.h / 2) * rect.h);
-  }
-  ctx.stroke();
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.35;
+  ctx.lineWidth = 10 * dpr;
+  strokeSmoothPath(smooth);
+  ctx.globalAlpha = 0.95;
+  ctx.lineWidth = 4.5 * dpr;
+  strokeSmoothPath(smooth);
   ctx.restore();
 }
 
@@ -3094,10 +3170,6 @@ function render(now) {
   updateZoneListUi(now);
 
   drawCrop(selected);
-
-  peopleStat.textContent = count === 1 ? "1 person" : `${count} people`;
-  detectStat.textContent = state.detectMs == null ? "— ms" : `${Math.round(state.detectMs)} ms`;
-  fpsStat.textContent = state.packetMarks.length ? `${state.packetMarks.length} fps` : "— fps";
 }
 
 async function pump() {
@@ -3145,6 +3217,9 @@ async function useCamera(fromRestore = false, preStream = null) {
     syncMirrorUi();
     state.sourceKind = "camera";
     state.sourceLabel = "Camera";
+    state.mot17Benchmark = false;
+    state.casiaBenchmark = false;
+    state.casiaSubjectId = null;
     state.sessionStartedAt = performance.now();
     state.running = true;
     setPlaybackUi(true);
@@ -3152,6 +3227,7 @@ async function useCamera(fromRestore = false, preStream = null) {
     if (!restoring && !applyingRecentSession) {
       beginRecentSession("camera", "Camera");
     }
+    refreshActiveSourceLine();
     scheduleSaveSettings();
   } catch {
     if (preStream) {
@@ -3161,7 +3237,211 @@ async function useCamera(fromRestore = false, preStream = null) {
   }
 }
 
-async function useFile(file, fromRestore = false) {
+function refreshActiveSourceLine() {
+  if (!activeSourceLine) return;
+  if (!state.running || !state.sourceKind) {
+    activeSourceLine.textContent =
+      "No video loaded — CASIA-B / MOT17 → Use, or Open video.";
+    return;
+  }
+  if (state.sourceKind === "camera") {
+    activeSourceLine.textContent = "Now playing: Camera (not a benchmark clip).";
+    return;
+  }
+  const name = state.sourceLabel || "Video";
+  if (state.casiaBenchmark) {
+    const sid = state.casiaSubjectId ? ` · subject ${state.casiaSubjectId}` : "";
+    activeSourceLine.textContent = `Now playing: ${name} — CASIA-B gait silhouettes${sid}. Metrics → Walk.`;
+  } else if (state.mot17Benchmark) {
+    activeSourceLine.textContent = `Now playing: ${name} — MOT17 benchmark (GT on disk, not in Walk UI).`;
+  } else {
+    activeSourceLine.textContent = `Now playing: ${name} — local/YouTube (not MOT17 / CASIA-B).`;
+  }
+}
+
+function setMot17Hint(text, isError = false) {
+  if (!mot17SampleHint) return;
+  if (!text) {
+    mot17SampleHint.hidden = true;
+    mot17SampleHint.textContent = "";
+    mot17SampleHint.classList.remove("error");
+    return;
+  }
+  mot17SampleHint.hidden = false;
+  mot17SampleHint.textContent = text;
+  mot17SampleHint.classList.toggle("error", isError);
+}
+
+async function loadMot17Manifest() {
+  if (!mot17SampleSelect) return;
+  try {
+    const res = await fetch("/samples/mot17-manifest.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("manifest missing");
+    const data = await res.json();
+    mot17Sequences = Array.isArray(data.sequences) ? data.sequences : [];
+    mot17SampleSelect.replaceChildren();
+    if (!mot17Sequences.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Run scripts/prepare_mot17.py";
+      mot17SampleSelect.append(opt);
+      setMot17Hint("Full MOT17 not prepared yet — see README.", true);
+      return;
+    }
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "—";
+    mot17SampleSelect.append(placeholder);
+    for (const seq of mot17Sequences) {
+      const opt = document.createElement("option");
+      opt.value = seq.file;
+      const gt =
+        typeof seq.gtPersons === "number" ? ` · ${seq.gtPersons} GT people` : "";
+      opt.textContent = `${seq.label}${gt}`;
+      mot17SampleSelect.append(opt);
+    }
+    const defaultSeq =
+      mot17Sequences.find((s) => s.id === "MOT17-05") ?? mot17Sequences[0];
+    if (defaultSeq?.file) {
+      mot17SampleSelect.value = defaultSeq.file;
+    }
+    setMot17Hint("Official MOT17 train clips — press Use, then Metrics → Walk.");
+  } catch {
+    mot17SampleSelect.replaceChildren();
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "MOT17 not installed";
+    mot17SampleSelect.append(opt);
+    setMot17Hint("Install MOT17, then run scripts/prepare_mot17.py.", true);
+  }
+}
+
+function setCasiaBHint(text, isError = false) {
+  if (!casiaBSampleHint) return;
+  if (!text) {
+    casiaBSampleHint.hidden = true;
+    casiaBSampleHint.textContent = "";
+    casiaBSampleHint.classList.remove("error");
+    return;
+  }
+  casiaBSampleHint.hidden = false;
+  casiaBSampleHint.textContent = text;
+  casiaBSampleHint.classList.toggle("error", isError);
+}
+
+async function loadCasiaBManifest() {
+  if (!casiaBSampleSelect) return;
+  try {
+    const res = await fetch("/samples/casia-b-manifest.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("manifest missing");
+    const data = await res.json();
+    casiaBSequences = Array.isArray(data.sequences) ? data.sequences : [];
+    casiaBSampleSelect.replaceChildren();
+    if (!casiaBSequences.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Run scripts/prepare_casia_b.py";
+      casiaBSampleSelect.append(opt);
+      setCasiaBHint("CASIA-B not prepared yet — run prepare_casia_b.py.", true);
+      return;
+    }
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "—";
+    casiaBSampleSelect.append(placeholder);
+    for (const seq of casiaBSequences) {
+      const opt = document.createElement("option");
+      opt.value = seq.file;
+      opt.textContent = seq.label || seq.id;
+      casiaBSampleSelect.append(opt);
+    }
+    const defaultSeq =
+      casiaBSequences.find((s) => s.subjectId === "001") ?? casiaBSequences[0];
+    if (defaultSeq?.file) {
+      casiaBSampleSelect.value = defaultSeq.file;
+    }
+    setCasiaBHint("Silhouette gait benchmark — pick subject → Use → Metrics → Walk.");
+  } catch {
+    casiaBSampleSelect.replaceChildren();
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "CASIA-B not installed";
+    casiaBSampleSelect.append(opt);
+    setCasiaBHint("Run scripts/prepare_casia_b.py after download_gait_datasets.py.", true);
+  }
+}
+
+async function useSelectedCasiaBSample() {
+  if (!casiaBSampleSelect) return;
+  const filePath = casiaBSampleSelect.value;
+  if (!filePath) {
+    setCasiaBHint("Pick a CASIA-B subject first.", true);
+    return;
+  }
+  const seq = casiaBSequences.find((s) => s.file === filePath);
+  setCasiaBHint("");
+  showSourceError("");
+  try {
+    const res = await fetch(filePath, { cache: "no-store" });
+    if (!res.ok) throw new Error("fetch failed");
+    const blob = await res.blob();
+    const name = seq?.id ? `${seq.id}.mp4` : "casia-b.mp4";
+    const file = new File([blob], name, { type: blob.type || "video/mp4" });
+    await useFile(file, false, {
+      mot17Benchmark: false,
+      casiaBenchmark: true,
+      casiaSubjectId: seq?.subjectId ?? null,
+      sourceLabel: seq?.label || name,
+    });
+    setCasiaBHint(
+      seq?.frames
+        ? `${seq.label}: ${seq.frames} silhouette frames · same subject = same person ID in dataset.`
+        : ""
+    );
+  } catch {
+    setCasiaBHint(
+      "Could not load CASIA-B clip. Use npm run dev (5173) or restart backend after prepare_casia_b.py.",
+      true
+    );
+  }
+}
+
+async function useSelectedMot17Sample() {
+  if (!mot17SampleSelect) return;
+  const filePath = mot17SampleSelect.value;
+  if (!filePath) {
+    setMot17Hint("Pick a MOT17 sequence first.", true);
+    return;
+  }
+  const seq = mot17Sequences.find((s) => s.file === filePath);
+  setMot17Hint("");
+  showSourceError("");
+  try {
+    const res = await fetch(filePath, { cache: "no-store" });
+    if (!res.ok) throw new Error("fetch failed");
+    const blob = await res.blob();
+    const name = seq?.id ? `${seq.id}.mp4` : "mot17.mp4";
+    const file = new File([blob], name, { type: blob.type || "video/mp4" });
+    await useFile(file, false, {
+      mot17Benchmark: true,
+      casiaBenchmark: false,
+      casiaSubjectId: null,
+      sourceLabel: seq?.label || name,
+    });
+    setMot17Hint(
+      seq?.frames
+        ? `${seq.label}: ${seq.frames} frames · open Metrics → Walk for gait vs. session relinks.`
+        : ""
+    );
+  } catch {
+    setMot17Hint(
+      "Could not load that MOT17 clip. Use http://localhost:5173 (npm run dev) or restart the backend after prepare_mot17.py.",
+      true
+    );
+  }
+}
+
+async function useFile(file, fromRestore = false, sourceMeta = null) {
   const restoring = fromRestore === true;
   showSourceError("");
   stopSource();
@@ -3180,14 +3460,27 @@ async function useFile(file, fromRestore = false) {
   }
   syncMirrorUi();
   state.sourceKind = "file";
-  state.sourceLabel = file.name || "Video";
+  const mot17FromName = /^MOT17-\d+\.mp4$/i.test(file.name || "");
+  const casiaFromName = /^CASIA-\d+\.mp4$/i.test(file.name || "");
+  state.mot17Benchmark = sourceMeta?.mot17Benchmark ?? mot17FromName;
+  state.casiaBenchmark = sourceMeta?.casiaBenchmark ?? casiaFromName;
+  state.casiaSubjectId = sourceMeta?.casiaSubjectId ?? null;
+  if (state.casiaBenchmark) {
+    state.mot17Benchmark = false;
+  }
+  if (state.mot17Benchmark) {
+    state.casiaBenchmark = false;
+    state.casiaSubjectId = null;
+  }
+  state.sourceLabel = sourceMeta?.sourceLabel || file.name || "Video";
   state.sessionStartedAt = performance.now();
   state.running = true;
   setPlaybackUi(true);
   syncZoneControls();
   if (!restoring && !applyingRecentSession) {
-    beginRecentSession("file", file.name || "Video", file);
+    beginRecentSession("file", state.sourceLabel || file.name || "Video", file);
   }
+  refreshActiveSourceLine();
   scheduleSaveSettings();
 }
 
@@ -3291,8 +3584,26 @@ function wireUi({ signal }) {
     );
   }
 
+  if (menuDockBottomInput) {
+    menuDockBottomInput.addEventListener(
+      "change",
+      () => {
+        state.menuDockBottom = menuDockBottomInput.checked;
+        applyMenuDock();
+        scheduleSaveSettings();
+      },
+      { signal }
+    );
+  }
+
   if (useRecentSessionBtn) {
     useRecentSessionBtn.addEventListener("click", () => useSelectedRecentSession(), { signal });
+  }
+  if (useMot17SampleBtn) {
+    useMot17SampleBtn.addEventListener("click", () => void useSelectedMot17Sample(), { signal });
+  }
+  if (useCasiaBSampleBtn) {
+    useCasiaBSampleBtn.addEventListener("click", () => void useSelectedCasiaBSample(), { signal });
   }
   if (openSnapshotBtn) {
     openSnapshotBtn.addEventListener("click", () => openSessionSnapshot(), { signal });
@@ -3498,6 +3809,12 @@ function followSelectionActive() {
   );
 }
 
+function applyMenuDock() {
+  const main = document.querySelector("main");
+  if (!main) return;
+  main.classList.toggle("menu-bottom", state.menuDockBottom);
+}
+
 function clampFollowPopupPosition() {
   if (!followPopup || followPopup.hidden) return;
   const margin = 8;
@@ -3560,8 +3877,8 @@ function drawCrop(box) {
   }
 
   const viewAspect = width / height;
-  let w = box.w * 1.44;
-  let h = box.h * 1.32;
+  let w = box.w * 1.22;
+  let h = box.h * 1.12;
   if (w / h > viewAspect) h = w / viewAspect;
   else w = h * viewAspect;
   if (w > 1 || h > 1) {
@@ -3843,6 +4160,8 @@ export function mountPeopleTracker(options = {}) {
   if (panelMetrics) metricsResizeObserver.observe(panelMetrics);
 
   connect();
+  void loadMot17Manifest();
+  void loadCasiaBManifest();
   syncZoneControls();
   showMetricsPickStep();
   updateChartEmptyStates();

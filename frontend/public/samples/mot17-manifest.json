@@ -1,0 +1,74 @@
+{
+  "sequences": [
+    {
+      "id": "MOT17-02",
+      "label": "MOT17-02 (train, SDP)",
+      "file": "/samples/MOT17-02.mp4",
+      "fps": 30,
+      "frames": 600,
+      "width": 1920,
+      "gtPersons": 83,
+      "seqDir": "output\\motchallenge\\MOT17\\train\\MOT17-02-SDP"
+    },
+    {
+      "id": "MOT17-04",
+      "label": "MOT17-04 (train, SDP)",
+      "file": "/samples/MOT17-04.mp4",
+      "fps": 30,
+      "frames": 1050,
+      "width": 1920,
+      "gtPersons": 141,
+      "seqDir": "output\\motchallenge\\MOT17\\train\\MOT17-04-SDP"
+    },
+    {
+      "id": "MOT17-05",
+      "label": "MOT17-05 (train, SDP)",
+      "file": "/samples/MOT17-05.mp4",
+      "fps": 14,
+      "frames": 837,
+      "width": 640,
+      "gtPersons": 156,
+      "seqDir": "output\\motchallenge\\MOT17\\train\\MOT17-05-SDP"
+    },
+    {
+      "id": "MOT17-09",
+      "label": "MOT17-09 (train, SDP)",
+      "file": "/samples/MOT17-09.mp4",
+      "fps": 30,
+      "frames": 525,
+      "width": 1920,
+      "gtPersons": 64,
+      "seqDir": "output\\motchallenge\\MOT17\\train\\MOT17-09-SDP"
+    },
+    {
+      "id": "MOT17-10",
+      "label": "MOT17-10 (train, SDP)",
+      "file": "/samples/MOT17-10.mp4",
+      "fps": 30,
+      "frames": 654,
+      "width": 1920,
+      "gtPersons": 73,
+      "seqDir": "output\\motchallenge\\MOT17\\train\\MOT17-10-SDP"
+    },
+    {
+      "id": "MOT17-11",
+      "label": "MOT17-11 (train, SDP)",
+      "file": "/samples/MOT17-11.mp4",
+      "fps": 30,
+      "frames": 900,
+      "width": 1920,
+      "gtPersons": 91,
+      "seqDir": "output\\motchallenge\\MOT17\\train\\MOT17-11-SDP"
+    },
+    {
+      "id": "MOT17-13",
+      "label": "MOT17-13 (train, SDP)",
+      "file": "/samples/MOT17-13.mp4",
+      "fps": 25,
+      "frames": 750,
+      "width": 1920,
+      "gtPersons": 188,
+      "seqDir": "output\\motchallenge\\MOT17\\train\\MOT17-13-SDP"
+    }
+  ]
+}

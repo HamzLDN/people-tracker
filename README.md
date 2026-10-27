@@ -39,20 +39,27 @@ Open `http://127.0.0.1:8000`.
 
 The legacy vanilla UI remains in `static/` as a fallback until you run `npm run build`.
 
-## MOT17 benchmark video (optional)
+## MOT17 (walk / re-ID benchmarks)
 
-To try the tracker on a standard **multi-object tracking** pedestrian dataset (same kind of technology MOT papers use), download **MOT17** video or frames, not precomputed `det.txt` files alone. The app needs **pixels**: use **Open video** with an `.mp4` (or another video file the browser can play).
+For **Metrics → Walk** and comparing relinks to **ground-truth person IDs**, use the **full MOT17** archive (train labels + test video). MOT17 is **CC BY-NC-SA 3.0** (non-commercial).
 
-The [MOTChallenge website](https://motchallenge.net/) may show an offline notice; the **dataset archives still download** from the published URLs.
+1. Download [MOT17.zip](https://motchallenge.net/data/MOT17.zip) (~5.5 GB) into `output/MOT17.zip`.
+2. Prepare browser videos + manifest (extracts to `output/motchallenge/`; prefers **SDP** train sequences):
 
-| What | URL |
-|------|-----|
-| **Full MOT17** (train + test, frames + labels) | [https://motchallenge.net/data/MOT17.zip](https://motchallenge.net/data/MOT17.zip) (~5.5 GB) |
-| **Train frames only** (mirror) | [https://storage.googleapis.com/com-roboflow-marketing/trackers/datasets/mot17-v1/mot17-train-frames.zip](https://storage.googleapis.com/com-roboflow-marketing/trackers/datasets/mot17-v1/mot17-train-frames.zip) |
+```bash
+.venv/Scripts/python.exe -m pip install imageio-ffmpeg
+.venv/Scripts/python.exe scripts/prepare_mot17.py
+```
 
-After unzip, pick one detector variant of a sequence (e.g. **`train/MOT17-05-SDP/`**; same video as `DPM` / `FRCNN`, different bundled detections). MOT17 is **CC BY-NC-SA 3.0** (non-commercial; see the MOTChallenge license notice).
+3. In the app **Source** tab, choose **MOT17 train video** → **Use**, then **Metrics → Walk**.
 
-Some Hugging Face mirrors (e.g. [Morrison1025/MOT17](https://huggingface.co/datasets/Morrison1025/MOT17)) only host **`det/det.txt`**, useful for offline benchmarks, not for opening video in this app.
+Offline score vs. `gt/gt.txt` on a train sequence:
+
+```bash
+.venv/Scripts/python.exe scripts/eval_mot17_walk.py --sequence MOT17-05-SDP
+```
+
+A smaller **train-frames-only** mirror exists for quick demos, but it has **no** official `gt.txt` — use full MOT17 when evaluating walk-based identity.
 
 ## Recent sessions
 

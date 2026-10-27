@@ -98,6 +98,9 @@ async def stream(websocket: WebSocket) -> None:
 
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 STATIC_DIR = FRONTEND_DIST if FRONTEND_DIST.is_dir() else ROOT / "static"
+SAMPLES_DIR = ROOT / "frontend" / "public" / "samples"
+if SAMPLES_DIR.is_dir():
+    app.mount("/samples", StaticFiles(directory=SAMPLES_DIR), name="samples")
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 

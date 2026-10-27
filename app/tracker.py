@@ -7,8 +7,10 @@ import random
 from app.one_euro import OneEuroFilter
 
 CONFIRM_HITS = 2
-COAST_FRAMES = 36
-UNCONFIRMED_COAST = 6
+# Keep a confirmed box only through a brief detector miss, then drop it.
+# Time-based so a slower frame rate cannot leave a ghost for several seconds.
+COAST_SECONDS = 0.35
+UNCONFIRMED_COAST_SECONDS = 0.12
 IOU_THRESHOLD = 0.25
 
 
@@ -56,6 +58,7 @@ class _Track:
         self.id = track_id
         self.hits = 1
         self.misses = 0
+        self.lost_since: float | None = None
         self.score = float(det["score"])
         self.fx = OneEuroFilter(min_cutoff, beta)
         self.fy = OneEuroFilter(min_cutoff, beta)
@@ -83,19 +86,29 @@ class _Track:
         self.score = float(det["score"])
         self.hits += 1
         self.misses = 0
+        self.lost_since = None
 
-    def mark_missed(self) -> None:
+    def mark_missed(self, t: float) -> None:
         self.misses += 1
+        if self.lost_since is None:
+            self.lost_since = t
 
     def box(self) -> tuple[float, float, float, float]:
         return _clip_box(self.cx - self.w / 2, self.cy - self.h / 2, self.w, self.h)
 
-    def visible(self) -> bool:
-        return self.hits >= CONFIRM_HITS and self.misses <= COAST_FRAMES
+    def _lost_for(self, t: float) -> float:
+        if self.lost_since is None:
+            return 0.0
+        return max(0.0, t - self.lost_since)
 
-    def expired(self) -> bool:
-        limit = COAST_FRAMES if self.hits >= CONFIRM_HITS else UNCONFIRMED_COAST
-        return self.misses > limit
+    def visible(self, t: float) -> bool:
+        if self.hits < CONFIRM_HITS:
+            return False
+        return self._lost_for(t) <= COAST_SECONDS
+
+    def expired(self, t: float) -> bool:
+        limit = COAST_SECONDS if self.hits >= CONFIRM_HITS else UNCONFIRMED_COAST_SECONDS
+        return self._lost_for(t) > limit
 
     def to_dict(self) -> dict:
         x, y, w, h = self.box()
@@ -147,10 +160,10 @@ class PersonTracker:
 
         for ti in range(previous_count):
             if ti not in matched_tracks:
-                self.tracks[ti].mark_missed()
+                self.tracks[ti].mark_missed(t)
 
-        self.tracks = [track for track in self.tracks if not track.expired()]
-        return [track.to_dict() for track in self.tracks if track.visible()]
+        self.tracks = [track for track in self.tracks if not track.expired(t)]
+        return [track.to_dict() for track in self.tracks if track.visible(t)]
 
 
 def _self_check() -> None:
@@ -197,13 +210,16 @@ def _self_check() -> None:
     if hidden:
         raise AssertionError("Unconfirmed detection was shown")
 
-    # After two hits, a short gap keeps the same id.
+    # After two hits, a short gap keeps the same id. A longer gap drops the box.
     tracker = PersonTracker()
     tracker.update([{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.4, "score": 0.9}], 1.0, 0.5)
     shown = tracker.update([{"x": 0.11, "y": 0.1, "w": 0.2, "h": 0.4, "score": 0.9}], 1.1, 0.5)
     held = tracker.update([], 1.2, 0.5)
     if not shown or not held or shown[0]["id"] != held[0]["id"] or not held[0]["held"]:
         raise AssertionError(f"Coast failed: {shown} {held}")
+    gone = tracker.update([], 1.2 + COAST_SECONDS + 0.05, 0.5)
+    if gone:
+        raise AssertionError(f"Box stayed after the person left: {gone}")
 
     print(f"tracker ok (raw jitter {raw_jitter:.4f}, smooth jitter {smooth_jitter:.4f})")
 
