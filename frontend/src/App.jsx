@@ -69,26 +69,81 @@ export default function App() {
 
   return (
     <div className="app">
-      <main>
+      <main className="shell">
+        <header className="topbar" id="topbar">
+          <button type="button" className="primary" id="cameraBtn">
+            Camera
+          </button>
+          <label className="btn">
+            Open video
+            <input id="file" type="file" accept="video/*" hidden />
+          </label>
+          <details className="samples">
+            <summary className="btn">Samples</summary>
+            <div className="samples-panel">
+              <label className="samples-field">
+                <span>MOT17</span>
+                <div className="row">
+                  <select id="mot17SampleSelect" aria-label="MOT17 train sequence">
+                    <option value="">Loading…</option>
+                  </select>
+                  <button type="button" className="btn primary" id="useMot17Sample">
+                    Use
+                  </button>
+                </div>
+              </label>
+              <p className="hint" id="mot17SampleHint" hidden />
+              <label className="samples-field">
+                <span>CASIA-B</span>
+                <div className="row">
+                  <select id="casiaBSampleSelect" aria-label="CASIA-B subject sequence">
+                    <option value="">Loading…</option>
+                  </select>
+                  <button type="button" className="btn primary" id="useCasiaBSample">
+                    Use
+                  </button>
+                </div>
+              </label>
+              <p className="hint" id="casiaBSampleHint" hidden />
+              <label className="samples-field">
+                <span>Recent</span>
+                <div className="row">
+                  <select id="savedProfileSelect" aria-label="Recent session">
+                    <option value="">—</option>
+                  </select>
+                  <button type="button" className="btn primary" id="useRecentSession">
+                    Use
+                  </button>
+                </div>
+              </label>
+              <p className="hint" id="activeSourceLine">No video loaded.</p>
+              <p className="hint error" id="sourceError" hidden />
+            </div>
+          </details>
+          <label className="check">
+            <input id="mirror" type="checkbox" defaultChecked />
+            Mirror
+          </label>
+          <label className="check">
+            <input id="showPopulatedArea" type="checkbox" />
+            Heatmap
+          </label>
+          <button type="button" className="btn" id="openSnapshot">
+            Snapshot
+          </button>
+        </header>
+
         <section className="stage-wrap">
           <div className="stage" id="stage">
             <video id="video" autoPlay playsInline muted />
             <canvas id="overlay" />
-            <div className="follow-popup" id="followPopup" hidden>
-              <div className="follow-popup-head" id="followPopupHead">
-                <span className="follow-popup-title" id="followPopupLabel">
-                  Person
-                </span>
-                <button
-                  type="button"
-                  className="follow-popup-close"
-                  id="followPopupClose"
-                  aria-label="Close follow view"
-                >
-                  ×
-                </button>
-              </div>
-              <canvas id="followPopupCanvas" aria-label="Follow zoom" />
+            <div className="stage-tools" id="stageTools">
+              <button type="button" className="btn zone-mode-btn" id="zoneModeBtn">
+                Draw zone
+              </button>
+              <button type="button" className="btn" id="zoneClearBtn" disabled>
+                Clear zones
+              </button>
             </div>
             <div className="empty" id="empty">
               <p>Start the camera, or open a video. Boxes are drawn on the people in frame.</p>
@@ -105,330 +160,137 @@ export default function App() {
           </div>
         </section>
 
-        <aside className="sidebar">
-          <div className="tabs" id="sidebarTabs" role="tablist" aria-label="Sidebar panels" hidden>
-            <button
-              type="button"
-              className="tab active"
-              id="tabSource"
-              role="tab"
-              aria-selected="true"
-              aria-controls="panelSource"
-            >
-              Source
-            </button>
-            <button
-              type="button"
-              className="tab"
-              id="tabMetrics"
-              role="tab"
-              aria-selected="false"
-              aria-controls="panelMetrics"
-            >
-              Metrics
-            </button>
+        <section className="chart-strip" id="panelMetrics" hidden>
+          <div className="chart-strip-label">
+            <span>People over time</span>
+            <span id="chartScope">Whole frame</span>
+          </div>
+          <div className="chart-plot">
+            <canvas id="metricsChart" aria-label="People in frame over time" />
+            <p className="chart-empty" id="metricsChartEmpty">
+              Waiting for samples…
+            </p>
+          </div>
+        </section>
+
+        <aside className="inspector" id="inspector" hidden>
+          <div className="inspector-body">
+          <section className="inspector-card" id="inspectorFrame">
+            <h2>Frame</h2>
+            <dl className="inspector-stats">
+              <div>
+                <dt>In frame</dt>
+                <dd id="statNow">—</dd>
+              </div>
+              <div>
+                <dt>Unique seen</dt>
+                <dd id="statUnique">—</dd>
+              </div>
+              <div>
+                <dt>Average</dt>
+                <dd id="statAvg">—</dd>
+              </div>
+              <div>
+                <dt>Busiest</dt>
+                <dd id="metricsBusiest">—</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section className="inspector-card" id="inspectorZone" hidden>
+            <h2 id="inspectorZoneTitle">Zone</h2>
+            <dl className="inspector-stats">
+              <div>
+                <dt>Inside</dt>
+                <dd id="inspectorZoneNow">—</dd>
+              </div>
+              <div>
+                <dt>Average</dt>
+                <dd id="inspectorZoneAvg">—</dd>
+              </div>
+              <div>
+                <dt>Entries</dt>
+                <dd id="inspectorZoneEntries">—</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section className="inspector-card" id="inspectorPerson" hidden>
+            <div className="follow-popup" id="followPopup" hidden>
+              <div className="follow-popup-head" id="followPopupHead">
+                <span className="follow-popup-title" id="followPopupLabel">
+                  Person
+                </span>
+                <button
+                  type="button"
+                  className="follow-popup-close"
+                  id="followPopupClose"
+                  aria-label="Close follow view"
+                >
+                  ×
+                </button>
+              </div>
+              <canvas id="followPopupCanvas" aria-label="Follow zoom" />
+            </div>
+            <p className="inspector-note" id="gaitSelectedSummary">
+              Click someone on the video.
+            </p>
+          </section>
+
+          <section className="inspector-zones" id="inspectorZones" hidden>
+            <h2>Zones</h2>
+            <ul className="zone-list" id="zoneList" aria-label="Count zones" />
+          </section>
           </div>
 
-          <div className="sidebar-body">
-            <div className="panel" id="panelSource" role="tabpanel" aria-labelledby="tabSource">
-              <section className="source-panel">
-                <label className="check">
-                  <input id="menuDockBottom" type="checkbox" />
-                  Menu along the bottom
-                </label>
-                <div className="row">
-                  <button type="button" className="primary" id="cameraBtn">
-                    Use camera
-                  </button>
-                  <label className="btn">
-                    Open video
-                    <input id="file" type="file" accept="video/*" hidden />
-                  </label>
-                </div>
-                <label className="check">
-                  <input id="mirror" type="checkbox" defaultChecked />
-                  Mirror camera
-                </label>
-                <label className="check">
-                  <input id="showPopulatedArea" type="checkbox" />
-                  Show traffic heatmap on video
-                </label>
-                <div className="saved-setups" id="mot17Samples" aria-label="MOT17 benchmark videos">
-                  <span className="saved-setups-label">MOT17 train video (benchmark)</span>
-                  <div className="row saved-setups-use">
-                    <select
-                      id="mot17SampleSelect"
-                      className="saved-profile-select"
-                      aria-label="MOT17 train sequence"
-                    >
-                      <option value="">Loading…</option>
-                    </select>
-                    <button type="button" className="btn primary" id="useMot17Sample">
-                      Use
-                    </button>
-                  </div>
-                  <p className="hint" id="mot17SampleHint" hidden />
-                </div>
-                <div className="saved-setups" id="casiaBSamples" aria-label="CASIA-B gait silhouettes">
-                  <span className="saved-setups-label">CASIA-B gait (silhouette benchmark)</span>
-                  <div className="row saved-setups-use">
-                    <select
-                      id="casiaBSampleSelect"
-                      className="saved-profile-select"
-                      aria-label="CASIA-B subject sequence"
-                    >
-                      <option value="">Loading…</option>
-                    </select>
-                    <button type="button" className="btn primary" id="useCasiaBSample">
-                      Use
-                    </button>
-                  </div>
-                  <p className="hint" id="casiaBSampleHint" hidden />
-                  <p className="hint" id="activeSourceLine">
-                    No video loaded — pick a benchmark or Open video.
-                  </p>
-                </div>
-                <div className="saved-setups" id="savedSetups" aria-label="Recent sessions">
-                  <span className="saved-setups-label">Select session</span>
-                  <div className="row saved-setups-use">
-                    <select id="savedProfileSelect" className="saved-profile-select" aria-label="Recent session">
-                      <option value="">—</option>
-                    </select>
-                    <button type="button" className="btn primary" id="useRecentSession">
-                      Use
-                    </button>
-                  </div>
-                  <p className="hint error" id="sourceError" hidden />
-                </div>
-                <div className="zones-toolbar">
-                  <button type="button" className="btn zone-mode-btn" id="zoneModeBtn">
-                    Draw zone
-                  </button>
-                  <button type="button" className="btn" id="zoneClearBtn" disabled>
-                    Clear all
-                  </button>
-                </div>
-                <ul className="zone-list" id="zoneList" aria-label="Count zones" />
-              </section>
+          <section className="charts-dock" id="chartsDock">
+            <div className="charts-panel" id="chartsPanel">
+              <div className="charts-tabs" role="tablist" aria-label="More charts">
+                <button type="button" className="charts-tab active" data-extra-tab="entries">
+                  Entries
+                </button>
+                <button type="button" className="charts-tab" data-extra-tab="dwell">
+                  Dwell
+                </button>
+                <button type="button" className="charts-tab" data-extra-tab="heat">
+                  Heatmap
+                </button>
+                <button type="button" className="charts-tab" data-extra-tab="zones">
+                  Zones
+                </button>
+                <button type="button" className="charts-tab" data-extra-tab="walk">
+                  Walk
+                </button>
+              </div>
+              <div className="combine-zones" id="combineZones">
+                <p className="combine-label">Combine zones</p>
+                <div className="combine-zone-list" id="combineZoneList" />
+              </div>
+              <div className="charts-plot" data-extra-chart="entries">
+                <canvas id="metricsEntries" aria-label="Entries over time" />
+                <p className="chart-empty" id="metricsEntriesEmpty">Waiting for entries…</p>
+              </div>
+              <div className="charts-plot" data-extra-chart="dwell" hidden>
+                <canvas id="metricsDwell" aria-label="Dwell time distribution" />
+                <p className="chart-empty" id="metricsDwellEmpty">Waiting for dwell samples…</p>
+              </div>
+              <div className="charts-plot" data-extra-chart="heat" hidden>
+                <canvas id="metricsHeat" aria-label="Traffic heatmap" />
+                <p className="chart-empty" id="metricsHeatEmpty">Waiting for traffic…</p>
+              </div>
+              <div className="charts-plot" data-extra-chart="zones" hidden>
+                <canvas id="metricsZonesChart" aria-label="Zone comparison chart" />
+                <p className="chart-empty" id="metricsZonesEmpty">Draw a zone to compare.</p>
+              </div>
+              <div className="charts-walk" data-extra-chart="walk" hidden>
+                <p className="inspector-note">Path and pace only. Not face ID.</p>
+                <h3>Active tracks</h3>
+                <ul className="gait-track-list" id="gaitTrackList" />
+                <h3>Similar walks</h3>
+                <ul className="gait-match-list" id="gaitMatchList" />
+              </div>
             </div>
-
-            <div className="panel" id="panelMetrics" role="tabpanel" aria-labelledby="tabMetrics" hidden>
-              <section className="metrics">
-                <section className="metrics-pick-step" id="metricsPickStep" aria-label="Choose zones">
-                  <p className="panel-hint" id="zoneMetricsHint">
-                    Tap each zone to include it. Then press <strong>Next</strong>.
-                  </p>
-                  <p className="zone-metrics-prompt" id="zoneMetricsPrompt" hidden />
-                  <div
-                    className="zone-pick-list"
-                    id="zoneMetricsMenu"
-                    role="listbox"
-                    aria-label="Zones to include"
-                  />
-                  <button type="button" className="btn primary zone-metrics-next" id="zoneMetricsNext" disabled>
-                    Next
-                  </button>
-                </section>
-
-                <div className="metrics-main-step" id="metricsMainStep" hidden>
-                  <div className="metrics-scope-bar" hidden>
-                    <span className="metrics-scope-label" id="metricsScopeLabel">
-                      —
-                    </span>
-                    <button type="button" className="btn metrics-change-scope" id="metricsChangeScope">
-                      Change
-                    </button>
-                  </div>
-
-                  <div className="metrics-menu-step" id="metricsMenuStep" aria-label="Choose report">
-                    <button type="button" className="btn primary snapshot-open-btn" id="openSnapshot">
-                      Session snapshot
-                    </button>
-                    <div className="metrics-subtabs" role="menu">
-                      <button type="button" className="metrics-subtab" data-metric="overview">
-                        Overview
-                      </button>
-                      <button type="button" className="metrics-subtab" data-metric="crowd">
-                        Crowd
-                      </button>
-                      <button type="button" className="metrics-subtab" data-metric="traffic">
-                        Traffic
-                      </button>
-                      <button type="button" className="metrics-subtab" data-metric="zones">
-                        Zones
-                      </button>
-                      <button type="button" className="metrics-subtab" data-metric="walk">
-                        Walk
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="metrics-detail-step" id="metricsDetailStep" hidden>
-                    <div className="metrics-detail-head">
-                      <div className="metrics-subtabs metrics-subtabs-bar" role="tablist" aria-label="Metric reports">
-                        <button type="button" className="metrics-subtab" data-metric="overview">
-                          Overview
-                        </button>
-                        <button type="button" className="metrics-subtab" data-metric="crowd">
-                          Crowd
-                        </button>
-                        <button type="button" className="metrics-subtab" data-metric="traffic">
-                          Traffic
-                        </button>
-                        <button type="button" className="metrics-subtab" data-metric="zones">
-                          Zones
-                        </button>
-                        <button type="button" className="metrics-subtab" data-metric="walk">
-                          Walk
-                        </button>
-                      </div>
-                      <span className="metrics-detail-title" id="metricsDetailTitle" hidden>
-                        Overview
-                      </span>
-                      <button type="button" className="btn" id="metricsBack" hidden>
-                        Back
-                      </button>
-                    </div>
-                    <div className="metrics-detail-body">
-                  <div className="metric-view" id="metricOverview" data-metric="overview" hidden>
-                    <div className="metric-main">
-                      <p className="metrics-summary" id="metricsSummary" hidden>
-                        People in frame over time.
-                      </p>
-                      <div className="metrics-chart-wrap metrics-chart-main">
-                        <span className="metrics-y-label">People in frame</span>
-                        <div className="chart-plot">
-                          <canvas id="metricsChart" aria-label="People in frame over time" />
-                          <p className="chart-empty" id="metricsChartEmpty">
-                            Waiting for samples…
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <aside className="metric-rail">
-                      <dl className="metrics-facts">
-                        <div>
-                          <dt>Most populated area</dt>
-                          <dd id="metricsBusiestArea">—</dd>
-                        </div>
-                        <div>
-                          <dt>Busiest at</dt>
-                          <dd id="metricsBusiest">—</dd>
-                        </div>
-                      </dl>
-                    </aside>
-                  </div>
-
-                  <div className="metric-view" id="metricCrowd" data-metric="crowd" hidden>
-                    <div className="metric-main metric-main-split">
-                      <div className="metrics-mini">
-                        <span className="metrics-mini-label">Entries</span>
-                        <div className="chart-plot">
-                          <canvas id="metricsEntries" aria-label="Entries over time" />
-                          <p className="chart-empty" id="metricsEntriesEmpty">
-                            Waiting for entries…
-                          </p>
-                        </div>
-                      </div>
-                      <div className="metrics-mini">
-                        <span className="metrics-mini-label">Dwell</span>
-                        <div className="chart-plot">
-                          <canvas id="metricsDwell" aria-label="Dwell time distribution" />
-                          <p className="chart-empty" id="metricsDwellEmpty">
-                            Waiting for dwell samples…
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <aside className="metric-rail">
-                      <div className="stat-pill">
-                        <span className="stat-pill-label">Unique seen</span>
-                        <strong id="statUnique">—</strong>
-                      </div>
-                      <div className="stat-pill">
-                        <span className="stat-pill-label">Avg in frame</span>
-                        <strong id="statAvg">—</strong>
-                      </div>
-                    </aside>
-                  </div>
-
-                  <div className="metric-view" id="metricTraffic" data-metric="traffic" hidden>
-                    <div className="metric-main">
-                      <div className="metrics-mini metrics-mini-wide">
-                        <span className="metrics-mini-label">Heatmap</span>
-                        <div className="chart-plot">
-                          <canvas id="metricsHeat" aria-label="Traffic heatmap" />
-                          <p className="chart-empty" id="metricsHeatEmpty">
-                            Waiting for traffic…
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <aside className="metric-rail">
-                      <dl className="metrics-facts">
-                        <div>
-                          <dt>Busiest area</dt>
-                          <dd id="trafficBusiestArea">—</dd>
-                        </div>
-                      </dl>
-                      <ol className="traffic-zone-rank" id="trafficZoneRank" />
-                    </aside>
-                  </div>
-
-                  <div className="metric-view" id="metricZones" data-metric="zones" hidden>
-                    <div className="metric-main">
-                      <div className="metrics-mini metrics-mini-wide">
-                        <span className="metrics-mini-label">Average people</span>
-                        <div className="chart-plot">
-                          <canvas id="metricsZonesChart" aria-label="Zone comparison chart" />
-                          <p className="chart-empty" id="metricsZonesEmpty">
-                            Draw zones on Source…
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <aside className="metric-rail">
-                      <div className="stat-pill">
-                        <span className="stat-pill-label">Zones</span>
-                        <strong id="statZoneCount">—</strong>
-                      </div>
-                      <div className="stat-pill">
-                        <span className="stat-pill-label">Leader</span>
-                        <strong id="statZoneLeader">—</strong>
-                      </div>
-                      <ul className="zones-metrics-list" id="zonesMetricsList" />
-                    </aside>
-                  </div>
-
-                  <div className="metric-view" id="metricWalk" data-metric="walk" hidden>
-                    <div className="metric-main metric-main-split">
-                      <div className="metric-list-card">
-                        <h3 className="gait-section-title">Active tracks</h3>
-                        <ul className="gait-track-list" id="gaitTrackList" />
-                      </div>
-                      <div className="metric-list-card">
-                        <h3 className="gait-section-title">Similar walks</h3>
-                        <ul className="gait-match-list" id="gaitMatchList" />
-                      </div>
-                    </div>
-                    <aside className="metric-rail">
-                      <p className="panel-hint gait-disclaimer">
-                        Path and pace only. Not face ID.
-                      </p>
-                      <dl className="metrics-facts">
-                        <div>
-                          <dt>Selected person</dt>
-                          <dd id="gaitSelectedSummary">Click someone on the video to inspect their walk.</dd>
-                        </div>
-                      </dl>
-                    </aside>
-                  </div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            </div>
-          </div>
+          </section>
         </aside>
       </main>
     </div>

@@ -44,8 +44,6 @@ let metricsCtx;
 let metricsSummary;
 let metricsBusiest;
 let metricsBusiestArea;
-let trafficBusiestArea;
-let trafficZoneRank;
 let showPopulatedAreaInput;
 let menuDockBottomInput;
 let metricsEntries;
@@ -79,6 +77,7 @@ let metricsBack;
 let metricsDetailTitle;
 let metricsScopeLabel;
 let metricsChangeScope;
+let metricsChooseZones;
 let zoneMetricsNext;
 let savedProfileSelect;
 let mot17SampleSelect;
@@ -108,6 +107,7 @@ const LOAD_ALL = { mirror: true, zones: true, heatmap: true, metrics: true };
 let saveSettingsTimer = null;
 let syncingRecentSelect = false;
 let applyingRecentSession = false;
+let combineMenuSignature = "";
 
 function bindDom() {
   video = document.getElementById("video");
@@ -141,8 +141,6 @@ function bindDom() {
   metricsSummary = document.getElementById("metricsSummary");
   metricsBusiest = document.getElementById("metricsBusiest");
   metricsBusiestArea = document.getElementById("metricsBusiestArea");
-  trafficBusiestArea = document.getElementById("trafficBusiestArea");
-  trafficZoneRank = document.getElementById("trafficZoneRank");
   showPopulatedAreaInput = document.getElementById("showPopulatedArea");
   menuDockBottomInput = document.getElementById("menuDockBottom");
   metricsEntries = document.getElementById("metricsEntries");
@@ -176,6 +174,7 @@ function bindDom() {
   metricsDetailTitle = document.getElementById("metricsDetailTitle");
   metricsScopeLabel = document.getElementById("metricsScopeLabel");
   metricsChangeScope = document.getElementById("metricsChangeScope");
+  metricsChooseZones = document.getElementById("metricsChooseZones");
   zoneMetricsNext = document.getElementById("zoneMetricsNext");
   savedProfileSelect = document.getElementById("savedProfileSelect");
   mot17SampleSelect = document.getElementById("mot17SampleSelect");
@@ -290,13 +289,18 @@ function clamp(value, low, high) {
 
 function setPlaybackUi(active) {
   empty.hidden = active;
-  sidebarTabs.hidden = !active;
-  if (!active) {
-    selectTab("source");
-  }
+  document.querySelector(".app")?.classList.toggle("is-live", active);
+  if (panelMetrics) panelMetrics.hidden = !active;
+  const inspector = document.getElementById("inspector");
+  if (inspector) inspector.hidden = !active;
+  state.metricsScopeStep = "main";
+  state.metricsNavStep = "detail";
+  state.metricsActiveView = "overview";
+  if (active) refreshMetrics();
 }
 
 function showSourceError(message) {
+  if (!sourceError) return;
   if (!message) {
     sourceError.hidden = true;
     sourceError.textContent = "";
@@ -567,7 +571,7 @@ function restoreZonesFromData(data) {
       typeof data.zoneNextId === "number" ? data.zoneNextId : 1,
       ...restored.map((z) => z.id + 1)
     );
-    state.highlightZoneId = restored[0].id;
+    state.highlightZoneId = null;
   } else {
     state.zones = [];
     state.highlightZoneId = null;
@@ -780,10 +784,14 @@ function resetCrowdMetrics() {
   state.dwellTimes = [];
   state.perfHistory = [];
   state.heatGrid.fill(0);
-  metricsSummary.textContent =
-    "People in frame over time. Run the video for a few seconds to fill the charts.";
-  metricsBusiest.textContent = "—";
-  metricsCtx.clearRect(0, 0, metricsChart.width, metricsChart.height);
+  if (metricsSummary) {
+    metricsSummary.textContent =
+      "People in frame over time. Run the video for a few seconds to fill the charts.";
+  }
+  if (metricsBusiest) metricsBusiest.textContent = "—";
+  if (metricsCtx && metricsChart) {
+    metricsCtx.clearRect(0, 0, metricsChart.width, metricsChart.height);
+  }
   clearMiniCharts();
   updateChartEmptyStates();
   if (statUnique) statUnique.textContent = "—";
@@ -1138,10 +1146,10 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
   const cssWidth = canvas.clientWidth || canvas.parentElement?.clientWidth || 0;
   const scale = cssWidth > 0 ? width / cssWidth : 1;
   const pad = {
-    l: Math.round(40 * scale),
-    r: Math.round(14 * scale),
-    t: Math.round(12 * scale),
-    b: Math.round(26 * scale),
+    l: Math.round(36 * scale),
+    r: Math.round(12 * scale),
+    t: Math.round(10 * scale),
+    b: Math.round(22 * scale),
   };
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
@@ -1157,7 +1165,7 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
   const xAt = (t) => pad.l + ((t - t0) / span) * plotW;
   const yAt = (count) => pad.t + plotH - (count / yMax) * plotH;
 
-  const fontSize = Math.round(12 * scale);
+  const fontSize = Math.round(11 * scale);
   ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillStyle = "rgba(163, 158, 145, 0.9)";
   ctx.textAlign = "right";
@@ -1165,7 +1173,8 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
 
   ctx.strokeStyle = "rgba(244, 241, 232, 0.1)";
   ctx.lineWidth = 1;
-  for (let tick = 0; tick <= yMax; tick += Math.max(1, Math.ceil(yMax / 4))) {
+  const yStep = Math.max(1, Math.ceil(yMax / Math.max(2, Math.floor(plotH / (28 * scale)))));
+  for (let tick = 0; tick <= yMax; tick += yStep) {
     const y = yAt(tick);
     ctx.fillText(String(tick), pad.l - 6, y);
     ctx.beginPath();
@@ -1239,22 +1248,30 @@ function drawMultiCountTimeChart(canvas, ctx, seriesList) {
   for (const p of allPoints) yMax = Math.max(yMax, p.count);
   yMax = Math.ceil(yMax);
 
-  const pad = { l: 34, r: 8, t: 8, b: 22 };
+  const cssWidth = canvas.clientWidth || canvas.parentElement?.clientWidth || 0;
+  const scale = cssWidth > 0 ? width / cssWidth : 1;
+  const pad = {
+    l: Math.round(36 * scale),
+    r: Math.round(12 * scale),
+    t: Math.round(10 * scale),
+    b: Math.round(22 * scale),
+  };
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
   const xAt = (t) => pad.l + ((t - t0) / span) * plotW;
   const yAt = (count) => pad.t + plotH - (count / yMax) * plotH;
 
-  const fontSize = Math.max(10, width * 0.028);
+  const fontSize = Math.round(11 * scale);
   ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
   ctx.fillStyle = "rgba(163, 158, 145, 0.9)";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
   ctx.strokeStyle = "rgba(244, 241, 232, 0.1)";
   ctx.lineWidth = 1;
-  for (let tick = 0; tick <= yMax; tick += Math.max(1, Math.ceil(yMax / 4))) {
+  const yStep = Math.max(1, Math.ceil(yMax / Math.max(2, Math.floor(plotH / (28 * scale)))));
+  for (let tick = 0; tick <= yMax; tick += yStep) {
     const y = yAt(tick);
-    ctx.fillText(String(tick), pad.l - 6, y);
+    ctx.fillText(String(tick), pad.l - 6 * scale, y);
     ctx.beginPath();
     ctx.moveTo(pad.l, y);
     ctx.lineTo(width - pad.r, y);
@@ -1271,7 +1288,7 @@ function drawMultiCountTimeChart(canvas, ctx, seriesList) {
       else ctx.lineTo(x, y);
     });
     ctx.strokeStyle = series.color;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = Math.max(2, 2 * scale);
     ctx.stroke();
   }
 
@@ -1329,6 +1346,70 @@ function toggleZoneIncluded(zoneId) {
   syncZoneMetricsMenu();
   updateZoneMetricsNextButton();
   scheduleSaveSettings();
+}
+
+function setCombinedZones(ids) {
+  state.metricsSelectedZoneIds = ids;
+  state.metricsScopeStep = "main";
+  state.metricsNavStep = "detail";
+  if (!ids.length) {
+    state.metricsZoneView = "frame";
+    state.metricsZoneId = null;
+    state.highlightZoneId = null;
+  } else {
+    applyMetricsZoneSelection();
+  }
+  combineMenuSignature = "";
+  zoneListSignature = "";
+  updateZoneListUi(performance.now());
+  refreshMetrics();
+  syncInspector();
+  scheduleSaveSettings();
+}
+
+function syncCombineMenu() {
+  const host = document.getElementById("combineZoneList");
+  if (!host) return;
+  const signature = [
+    state.zones.map((z) => `${z.id}:${z.name}`).join("|"),
+    state.metricsSelectedZoneIds.join(","),
+  ].join(";");
+  if (signature === combineMenuSignature) return;
+  combineMenuSignature = signature;
+  host.replaceChildren();
+  if (!state.zones.length) return;
+  const selected = new Set(state.metricsSelectedZoneIds);
+  for (const zone of state.zones) {
+    const label = document.createElement("label");
+    label.className = "combine-zone";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = selected.has(zone.id);
+    input.addEventListener("change", () => {
+      const ids = new Set(state.metricsSelectedZoneIds);
+      if (input.checked) ids.add(zone.id);
+      else ids.delete(zone.id);
+      setCombinedZones([...ids]);
+    });
+    const swatch = document.createElement("span");
+    swatch.className = "zone-swatch";
+    swatch.style.background = zoneColor(zone);
+    const name = document.createElement("span");
+    name.textContent = zone.name;
+    label.append(input, swatch, name);
+    host.append(label);
+  }
+}
+
+function showExtraChart(name) {
+  state.extraChart = name;
+  for (const view of document.querySelectorAll("[data-extra-chart]")) {
+    view.hidden = view.dataset.extraChart !== name;
+  }
+  for (const btn of document.querySelectorAll("[data-extra-tab]")) {
+    btn.classList.toggle("active", btn.dataset.extraTab === name);
+  }
+  refreshMetrics();
 }
 
 function updateZoneMetricsNextButton() {
@@ -1689,53 +1770,6 @@ function refreshPopulationInsights() {
   const summary = formatBusiestAreaSummary(leader, hotspot);
 
   if (metricsBusiestArea) metricsBusiestArea.textContent = summary || "—";
-  if (trafficBusiestArea) {
-    if (leader && leader.personSeconds > 0.5) {
-      trafficBusiestArea.textContent = `${leader.zone.name} — most time with people inside (${leader.personSeconds.toFixed(0)} person·s)`;
-    } else if (hotspot) {
-      trafficBusiestArea.textContent = `${hotspot.label} of frame — strongest foot-traffic cell`;
-    } else {
-      trafficBusiestArea.textContent = "—";
-    }
-  }
-
-  if (trafficZoneRank) {
-    trafficZoneRank.replaceChildren();
-    const maxPs = ranked[0]?.personSeconds || 1;
-    ranked.forEach((row, index) => {
-      const li = document.createElement("li");
-      li.className = "zone-rank-item";
-      if (index === 0 && row.personSeconds > 0) li.classList.add("leader");
-
-      const rank = document.createElement("span");
-      rank.className = "zone-rank-meta";
-      rank.textContent = `#${index + 1}`;
-
-      const body = document.createElement("div");
-      const title = document.createElement("strong");
-      title.textContent = row.zone.name;
-      const barWrap = document.createElement("div");
-      barWrap.className = "zone-rank-bar-wrap";
-      const bar = document.createElement("span");
-      bar.className = "zone-rank-bar";
-      bar.style.width = `${Math.max(4, (row.personSeconds / maxPs) * 100)}%`;
-      bar.style.background = zoneColor(row.zone);
-      barWrap.append(bar);
-      body.append(title, barWrap);
-
-      const meta = document.createElement("span");
-      meta.className = "zone-rank-meta";
-      meta.textContent =
-        row.personSeconds > 0
-          ? `${row.personSeconds.toFixed(0)}p·s`
-          : row.avg > 0
-            ? `~${row.avg.toFixed(1)} avg`
-            : "—";
-
-      li.append(rank, body, meta);
-      trafficZoneRank.append(li);
-    });
-  }
 }
 
 function drawBucketChart(canvas, ctx, entryTimes, barColor) {
@@ -1852,25 +1886,21 @@ function drawOverviewChart() {
 }
 
 function refreshMetrics() {
-  if (state.metricsScopeStep === "pick") {
-    syncMetricsPickStep();
-    return;
-  }
-  if (state.metricsNavStep === "menu") {
-    return;
-  }
+  if (!metricsChart || !metricsCtx) return;
+  state.metricsScopeStep = "main";
+  state.metricsNavStep = "detail";
 
   const history = scopedCrowdHistory();
   const analysis = analyzeCrowd(history);
 
-  if (analysis) {
+  if (analysis && metricsBusiest) {
     const peakLabel =
       analysis.peakCount === 1 ? "1 person" : `${Math.round(analysis.peakCount)} people`;
     metricsBusiest.textContent = `${peakLabel} at ${formatClock(analysis.peakTime)}`;
-    metricsSummary.textContent = "";
+    if (metricsSummary) metricsSummary.textContent = "";
   } else {
-    metricsSummary.textContent = "Counting… keep the video running.";
-    metricsBusiest.textContent = "—";
+    if (metricsSummary) metricsSummary.textContent = "Counting… keep the video running.";
+    if (metricsBusiest) metricsBusiest.textContent = "—";
   }
 
   const avg = averageCrowd(history);
@@ -1933,7 +1963,7 @@ function drawEntryChart() {
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
   const barW = plotW / keys.length;
-  const countFont = `${Math.round(12 * scale)}px ui-sans-serif, system-ui, sans-serif`;
+  const countFont = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
 
   keys.forEach((key, i) => {
     const val = values[i];
@@ -1996,7 +2026,7 @@ function drawDwellChart() {
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
   const barW = plotW / counts.length;
-  const countFont = `${Math.round(12 * scale)}px ui-sans-serif, system-ui, sans-serif`;
+  const countFont = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
 
   counts.forEach((val, i) => {
     const bh = val > 0 ? (val / maxVal) * plotH : 0;
@@ -2056,7 +2086,7 @@ function drawZonesCompareChart() {
     metricsZonesCtx.fillRect(pad.l, y, barW, barH);
     metricsZonesCtx.fillStyle = "rgba(244, 241, 232, 0.92)";
     const scale = chartScale(metricsZonesChart);
-    metricsZonesCtx.font = `${Math.round(12 * scale)}px ui-sans-serif, system-ui, sans-serif`;
+    metricsZonesCtx.font = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
     metricsZonesCtx.textAlign = "left";
     metricsZonesCtx.textBaseline = "middle";
     metricsZonesCtx.fillText(row.avg.toFixed(1), pad.l + barW + 8, y + barH / 2);
@@ -2241,30 +2271,11 @@ function selectMetricView(name) {
   refreshMetrics();
 }
 
-function selectTab(tab) {
-  const source = tab === "source";
-  tabSource.classList.toggle("active", source);
-  tabMetrics.classList.toggle("active", !source);
-  tabSource.setAttribute("aria-selected", String(source));
-  tabMetrics.setAttribute("aria-selected", String(!source));
-  panelSource.hidden = !source;
-  panelMetrics.hidden = source;
-  if (!source) {
-    if (state.zones.length && !state.metricsSelectedZoneIds.length) {
-      state.metricsSelectedZoneIds = state.zones.map((zone) => zone.id);
-      applyMetricsZoneSelection();
-    }
-    if (state.metricsScopeStep === "pick" || !metricsMainStep || metricsMainStep.hidden) {
-      showMetricsMainStep();
-      return;
-    }
-    if (state.metricsNavStep === "detail" && state.metricsActiveView) {
-      showMetricsDetail(state.metricsActiveView);
-    } else {
-      showMetricsDetail("overview");
-    }
-    refreshMetrics();
-  }
+function selectTab() {
+  state.metricsScopeStep = "main";
+  state.metricsNavStep = "detail";
+  state.metricsActiveView = "overview";
+  refreshMetrics();
 }
 
 function clearZones() {
@@ -2514,12 +2525,10 @@ function addZoneFromDraft(draft) {
   };
   initZoneMetrics(zone);
   state.zones.push(zone);
-  state.highlightZoneId = id;
-  state.metricsZoneId = id;
   zoneMenuSignature = "";
-  updateZoneListUi(performance.now());
   syncZoneControls();
   setZoneMode(false);
+  selectZone(zone);
   scheduleSaveSettings();
 }
 
@@ -2614,13 +2623,7 @@ function updateZoneListUi(now) {
     actions.append(renameBtn, removeBtn);
 
     li.addEventListener("click", () => {
-      state.highlightZoneId = zone.id;
-      state.metricsZoneId = zone.id;
-      zoneListSignature = "";
-      updateZoneListUi(now);
-      if (!panelMetrics.hidden && state.metricsScopeStep === "main") {
-        setMetricsZoneId(zone.id);
-      }
+      selectZone(zone);
     });
 
     li.append(swatch, main, actions);
@@ -3168,6 +3171,7 @@ function render(now) {
     drawZoneShape(rect, state.zoneDraft, { draft: true });
   }
   updateZoneListUi(now);
+  syncInspector();
 
   drawCrop(selected);
 }
@@ -3251,7 +3255,7 @@ function refreshActiveSourceLine() {
   const name = state.sourceLabel || "Video";
   if (state.casiaBenchmark) {
     const sid = state.casiaSubjectId ? ` · subject ${state.casiaSubjectId}` : "";
-    activeSourceLine.textContent = `Now playing: ${name} — CASIA-B gait silhouettes${sid}. Metrics → Walk.`;
+    activeSourceLine.textContent = `Now playing: ${name} — CASIA-B gait silhouettes${sid}.`;
   } else if (state.mot17Benchmark) {
     activeSourceLine.textContent = `Now playing: ${name} — MOT17 benchmark (GT on disk, not in Walk UI).`;
   } else {
@@ -3305,7 +3309,7 @@ async function loadMot17Manifest() {
     if (defaultSeq?.file) {
       mot17SampleSelect.value = defaultSeq.file;
     }
-    setMot17Hint("Official MOT17 train clips — press Use, then Metrics → Walk.");
+    setMot17Hint("Official MOT17 train clips. Press Use to play one.");
   } catch {
     mot17SampleSelect.replaceChildren();
     const opt = document.createElement("option");
@@ -3360,7 +3364,7 @@ async function loadCasiaBManifest() {
     if (defaultSeq?.file) {
       casiaBSampleSelect.value = defaultSeq.file;
     }
-    setCasiaBHint("Silhouette gait benchmark — pick subject → Use → Metrics → Walk.");
+    setCasiaBHint("Silhouette gait benchmark. Pick a subject, then Use.");
   } catch {
     casiaBSampleSelect.replaceChildren();
     const opt = document.createElement("option");
@@ -3430,14 +3434,11 @@ async function useSelectedMot17Sample() {
     });
     setMot17Hint(
       seq?.frames
-        ? `${seq.label}: ${seq.frames} frames · open Metrics → Walk for gait vs. session relinks.`
+        ? `${seq.label}: ${seq.frames} frames.`
         : ""
     );
   } catch {
-    setMot17Hint(
-      "Could not load that MOT17 clip. Use http://localhost:5173 (npm run dev) or restart the backend after prepare_mot17.py.",
-      true
-    );
+    setMot17Hint("Could not load that MOT17 clip.", true);
   }
 }
 
@@ -3485,8 +3486,8 @@ async function useFile(file, fromRestore = false, sourceMeta = null) {
 }
 
 function wireUi({ signal }) {
-  tabSource.addEventListener("click", () => selectTab("source"), { signal });
-  tabMetrics.addEventListener("click", () => selectTab("metrics"), { signal });
+  if (tabSource) tabSource.addEventListener("click", () => selectTab("source"), { signal });
+  if (tabMetrics) tabMetrics.addEventListener("click", () => selectTab("metrics"), { signal });
 
   for (const btn of metricSubtabs) {
     btn.setAttribute("role", "menuitem");
@@ -3550,6 +3551,7 @@ function wireUi({ signal }) {
   if (zoneClearBtn) zoneClearBtn.addEventListener("click", clearZones, { signal });
   if (zoneMetricsNext) zoneMetricsNext.addEventListener("click", goToMetricsMain, { signal });
   if (metricsChangeScope) metricsChangeScope.addEventListener("click", backToMetricsPick, { signal });
+  if (metricsChooseZones) metricsChooseZones.addEventListener("click", backToMetricsPick, { signal });
 
   window.addEventListener(
     "keydown",
@@ -3608,6 +3610,13 @@ function wireUi({ signal }) {
   if (openSnapshotBtn) {
     openSnapshotBtn.addEventListener("click", () => openSessionSnapshot(), { signal });
   }
+  for (const btn of document.querySelectorAll("[data-extra-tab]")) {
+    btn.addEventListener(
+      "click",
+      () => showExtraChart(btn.dataset.extraTab),
+      { signal }
+    );
+  }
   if (savedProfileSelect) {
     savedProfileSelect.addEventListener(
       "change",
@@ -3645,7 +3654,11 @@ function wireUi({ signal }) {
           zoneId: corner.zone.id,
           cornerIndex: corner.cornerIndex,
         };
-        overlay.setPointerCapture(event.pointerId);
+        try {
+          overlay.setPointerCapture(event.pointerId);
+        } catch {
+          /* corner drag still follows pointermove */
+        }
         return;
       }
       if (!state.zoneMode) return;
@@ -3653,8 +3666,12 @@ function wireUi({ signal }) {
       if (!point) return;
       event.preventDefault();
       zoneDragPointer = event.pointerId;
-      overlay.setPointerCapture(event.pointerId);
       state.zoneDraft = zoneDraftFromAnchor(point.nx, point.ny, point.nx, point.ny);
+      try {
+        overlay.setPointerCapture(event.pointerId);
+      } catch {
+        /* drag still follows pointermove on the overlay */
+      }
     },
     { signal }
   );
@@ -3735,14 +3752,20 @@ function wireUi({ signal }) {
       }
       const point = pointFromEvent(event);
       if (!point) return;
+      const zoneHit = zoneAtPoint(point.nx, point.ny);
       const hit = trackAt(point.nx, point.ny);
+      if (zoneHit && hit == null) {
+        selectZone(zoneHit);
+        return;
+      }
       if (hit == null || hit === state.selectedId) {
-        clearPersonSelection();
+        selectFrame();
       } else {
         state.finishedTrail = null;
         state.selectedId = hit;
         updateFollowPopupChrome();
         refreshGaitPanel();
+        syncInspector();
       }
     },
     { signal }
@@ -3809,14 +3832,10 @@ function followSelectionActive() {
   );
 }
 
-function applyMenuDock() {
-  const main = document.querySelector("main");
-  if (!main) return;
-  main.classList.toggle("menu-bottom", state.menuDockBottom);
-}
+function applyMenuDock() {}
 
 function clampFollowPopupPosition() {
-  if (!followPopup || followPopup.hidden) return;
+  if (!followPopup || followPopup.hidden || followPopup.closest(".inspector")) return;
   const margin = 8;
   const maxX = Math.max(margin, stage.clientWidth - followPopup.offsetWidth - margin);
   const maxY = Math.max(margin, stage.clientHeight - followPopup.offsetHeight - margin);
@@ -3863,6 +3882,81 @@ function clearPersonSelection() {
   state.selectedId = null;
   state.finishedTrail = null;
   updateFollowPopupChrome();
+  syncInspector();
+}
+
+function selectZone(zone) {
+  if (!zone) return;
+  state.selectedId = null;
+  state.finishedTrail = null;
+  updateFollowPopupChrome();
+  state.highlightZoneId = zone.id;
+  state.metricsScopeStep = "main";
+  state.metricsNavStep = "detail";
+  combineMenuSignature = "";
+  setMetricsZoneId(zone.id);
+  zoneListSignature = "";
+  updateZoneListUi(performance.now());
+  syncInspector();
+}
+
+function selectFrame() {
+  state.selectedId = null;
+  state.finishedTrail = null;
+  updateFollowPopupChrome();
+  state.highlightZoneId = null;
+  state.metricsZoneView = "frame";
+  state.metricsZoneId = null;
+  state.metricsSelectedZoneIds = [];
+  state.metricsScopeStep = "main";
+  state.metricsNavStep = "detail";
+  combineMenuSignature = "";
+  zoneListSignature = "";
+  updateZoneListUi(performance.now());
+  refreshMetrics();
+  syncInspector();
+}
+
+function syncInspector() {
+  const frameEl = document.getElementById("inspectorFrame");
+  const zoneEl = document.getElementById("inspectorZone");
+  const personEl = document.getElementById("inspectorPerson");
+  if (!frameEl) return;
+  const person = followSelectionActive();
+  const zone = zoneById(state.highlightZoneId);
+  const showZone = !person && !!zone;
+  frameEl.hidden = Boolean(person || showZone);
+  if (zoneEl) zoneEl.hidden = !showZone;
+  if (personEl) personEl.hidden = !person;
+
+  const nowEl = document.getElementById("statNow");
+  if (nowEl) nowEl.textContent = state.running ? String(state.tracks.size) : "—";
+
+  const scope = document.getElementById("chartScope");
+  const combined = state.metricsZoneView === "multi" ? getSelectedZones() : [];
+  if (scope) {
+    if (combined.length > 1) scope.textContent = combined.map((z) => z.name).join(", ");
+    else {
+      const chartZone = state.metricsZoneView === "zone" ? activeMetricsZone() : null;
+      scope.textContent = chartZone ? chartZone.name : "Whole frame";
+    }
+  }
+
+  if (showZone) {
+    const summary = zoneSummaryStats(zone, performance.now());
+    const title = document.getElementById("inspectorZoneTitle");
+    if (title) title.textContent = zone.name;
+    const now = document.getElementById("inspectorZoneNow");
+    const avg = document.getElementById("inspectorZoneAvg");
+    const entries = document.getElementById("inspectorZoneEntries");
+    if (now) now.textContent = String(summary.now);
+    if (avg) avg.textContent = summary.avg != null ? summary.avg.toFixed(1) : "—";
+    if (entries) entries.textContent = String(summary.entries);
+  }
+
+  const zonesBlock = document.getElementById("inspectorZones");
+  if (zonesBlock) zonesBlock.hidden = state.zones.length === 0;
+  syncCombineMenu();
 }
 
 function drawCrop(box) {
@@ -3931,6 +4025,21 @@ function trackAt(nx, ny) {
     const area = track.w * track.h;
     if (area < bestArea) {
       best = id;
+      bestArea = area;
+    }
+  }
+  return best;
+}
+
+function zoneAtPoint(nx, ny) {
+  let best = null;
+  let bestArea = Infinity;
+  for (const zone of state.zones) {
+    const corners = zoneCorners(zone);
+    if (!pointInPolygon(nx, ny, corners)) continue;
+    const area = Math.max(0.0001, (zone.w || 0) * (zone.h || 0));
+    if (area < bestArea) {
+      best = zone;
       bestArea = area;
     }
   }
@@ -4158,12 +4267,17 @@ export function mountPeopleTracker(options = {}) {
   metricsResizeObserver = new ResizeObserver(metricsResize);
   if (metricsChartWrap) metricsResizeObserver.observe(metricsChartWrap);
   if (panelMetrics) metricsResizeObserver.observe(panelMetrics);
+  const chartsDock = document.getElementById("chartsDock");
+  if (chartsDock) metricsResizeObserver.observe(chartsDock);
 
   connect();
   void loadMot17Manifest();
   void loadCasiaBManifest();
   syncZoneControls();
-  showMetricsPickStep();
+  state.metricsScopeStep = "main";
+  state.metricsNavStep = "detail";
+  state.metricsActiveView = "overview";
+  if (!state.metricsZoneView) state.metricsZoneView = "frame";
   updateChartEmptyStates();
   renderActive = true;
   requestAnimationFrame(render);
