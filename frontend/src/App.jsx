@@ -1,4 +1,16 @@
 import { useEffect, useState } from "react";
+
+function ChartStyleBar({ styleKey }) {
+  return (
+    <div className="chart-style-bar" data-style-key={styleKey}>
+      {["line", "bar", "area"].map((style) => (
+        <button key={style} type="button" className="chart-style-btn" data-chart-style={style}>
+          {style[0].toUpperCase() + style.slice(1)}
+        </button>
+      ))}
+    </div>
+  );
+}
 import { mountPeopleTracker } from "./tracker/engine.js";
 import SnapshotInsights from "./SnapshotInsights.jsx";
 import {
@@ -138,12 +150,23 @@ export default function App() {
             <video id="video" autoPlay playsInline muted />
             <canvas id="overlay" />
             <div className="stage-tools" id="stageTools">
-              <button type="button" className="btn zone-mode-btn" id="zoneModeBtn">
-                Draw zone
-              </button>
-              <button type="button" className="btn" id="zoneClearBtn" disabled>
-                Clear zones
-              </button>
+              <div className="draw-menu" id="drawMenu" role="toolbar" aria-label="Draw zones">
+                <button type="button" className="btn draw-tool" id="drawBoxBtn">
+                  Box
+                </button>
+                <button type="button" className="btn draw-tool" id="drawLineBtn">
+                  Line
+                </button>
+                <button type="button" className="btn" id="zoneEditBtn" hidden>
+                  Edit
+                </button>
+                <button type="button" className="btn" id="zoneDeleteBtn" hidden>
+                  Delete
+                </button>
+                <button type="button" className="btn" id="zoneClearBtn" disabled>
+                  Clear
+                </button>
+              </div>
             </div>
             <div className="empty" id="empty">
               <p>Start the camera, or open a video. Boxes are drawn on the people in frame.</p>
@@ -165,7 +188,7 @@ export default function App() {
             <span>People over time</span>
             <span id="chartScope">Whole frame</span>
           </div>
-          <div className="chart-plot">
+          <div className="chart-plot" id="metricsChartPlot">
             <canvas id="metricsChart" aria-label="People in frame over time" />
             <p className="chart-empty" id="metricsChartEmpty">
               Waiting for samples…
@@ -174,7 +197,7 @@ export default function App() {
         </section>
 
         <aside className="inspector" id="inspector" hidden>
-          <div className="inspector-body">
+          <div className="inspector-body" id="inspectorBody">
           <section className="inspector-card" id="inspectorFrame">
             <h2>Frame</h2>
             <dl className="inspector-stats">
@@ -216,24 +239,8 @@ export default function App() {
           </section>
 
           <section className="inspector-card" id="inspectorPerson" hidden>
-            <div className="follow-popup" id="followPopup" hidden>
-              <div className="follow-popup-head" id="followPopupHead">
-                <span className="follow-popup-title" id="followPopupLabel">
-                  Person
-                </span>
-                <button
-                  type="button"
-                  className="follow-popup-close"
-                  id="followPopupClose"
-                  aria-label="Close follow view"
-                >
-                  ×
-                </button>
-              </div>
-              <canvas id="followPopupCanvas" aria-label="Follow zoom" />
-            </div>
             <p className="inspector-note" id="gaitSelectedSummary">
-              Click someone on the video.
+              Click a person on the video to lock the follow camera.
             </p>
           </section>
 
@@ -244,53 +251,141 @@ export default function App() {
           </div>
 
           <section className="charts-dock" id="chartsDock">
+            <div className="analysis-scope" id="analysisScope">
+              <p className="hint analysis-scope-lead" id="analysisScopeLead">
+                Tap a zone on the video to include it, or pick below.
+              </p>
+              <div className="zone-scope-list is-visible" id="zoneScopeList" />
+              <div className="analysis-scope-empty" id="analysisScopeEmpty">
+                <p className="hint analysis-scope-hint">
+                  No zones on this video yet. Draw one on the frame, then tap it to select.
+                </p>
+                <button type="button" className="btn" id="analysisDrawZoneBtn">
+                  Draw zone on video
+                </button>
+              </div>
+              <div className="analysis-scope-actions">
+                <button type="button" className="primary" id="analyticsScopeNext">
+                  Next
+                </button>
+              </div>
+            </div>
             <div className="charts-panel" id="chartsPanel">
-              <div className="charts-tabs" role="tablist" aria-label="More charts">
-                <button type="button" className="charts-tab active" data-extra-tab="entries">
-                  Entries
+              <div className="analytics-scope-summary" id="analyticsScopeSummary">
+                <div className="analytics-zone-chips" id="analyticsZoneChips" />
+                <button type="button" className="analytics-change-zones" id="analyticsChangeZones">
+                  Change zones
+                </button>
+              </div>
+              <div className="charts-tabs" role="tablist" aria-label="Metrics">
+                <button type="button" className="charts-tab active" data-extra-tab="summary">
+                  Summary
+                </button>
+                <button type="button" className="charts-tab" data-extra-tab="occupancy">
+                  Occupancy
+                </button>
+                <button type="button" className="charts-tab" data-extra-tab="arrivals">
+                  Arrivals
                 </button>
                 <button type="button" className="charts-tab" data-extra-tab="dwell">
                   Dwell
                 </button>
-                <button type="button" className="charts-tab" data-extra-tab="heat">
-                  Heatmap
+                <button type="button" className="charts-tab" data-extra-tab="traffic">
+                  Traffic
                 </button>
-                <button type="button" className="charts-tab" data-extra-tab="zones">
-                  Zones
+                <button type="button" className="charts-tab" data-extra-tab="compare">
+                  Compare
                 </button>
-                <button type="button" className="charts-tab" data-extra-tab="walk">
-                  Walk
+                <button type="button" className="charts-tab" data-extra-tab="performance">
+                  Performance
                 </button>
               </div>
-              <div className="combine-zones" id="combineZones">
-                <p className="combine-label">Combine zones</p>
-                <div className="combine-zone-list" id="combineZoneList" />
+              <div className="charts-extra" data-extra-chart="summary">
+                <div className="metrics-kpi-grid" id="metricsKpiGrid" />
+                <ul className="metrics-insight-list" id="metricsInsightList" />
+                <div className="metrics-zone-table-wrap" id="metricsZoneTableWrap" hidden>
+                  <table className="metrics-zone-table">
+                    <thead>
+                      <tr>
+                        <th>Zone</th>
+                        <th>Now</th>
+                        <th>Avg</th>
+                        <th>Peak</th>
+                        <th>Entries</th>
+                      </tr>
+                    </thead>
+                    <tbody id="metricsZoneTableBody" />
+                  </table>
+                </div>
               </div>
-              <div className="charts-plot" data-extra-chart="entries">
-                <canvas id="metricsEntries" aria-label="Entries over time" />
-                <p className="chart-empty" id="metricsEntriesEmpty">Waiting for entries…</p>
+              <div className="charts-extra" data-extra-chart="occupancy" hidden>
+                <ChartStyleBar styleKey="occupancy" />
+                <div className="charts-plot charts-plot-tall" id="metricsOccupancyPlot">
+                  <canvas id="metricsOccupancy" aria-label="Occupancy over time" />
+                  <p className="chart-empty">Waiting for occupancy…</p>
+                </div>
               </div>
-              <div className="charts-plot" data-extra-chart="dwell" hidden>
-                <canvas id="metricsDwell" aria-label="Dwell time distribution" />
-                <p className="chart-empty" id="metricsDwellEmpty">Waiting for dwell samples…</p>
+              <div className="charts-extra" data-extra-chart="arrivals" hidden>
+                <ChartStyleBar styleKey="entries" />
+                <p className="chart-caption" id="metricsEntriesCaption" hidden />
+                <div className="charts-plot charts-plot-tall" id="metricsEntriesPlot">
+                  <canvas id="metricsEntries" aria-label="Arrivals over time" />
+                  <p className="chart-empty" id="metricsEntriesEmpty">Waiting for arrivals…</p>
+                </div>
               </div>
-              <div className="charts-plot" data-extra-chart="heat" hidden>
-                <canvas id="metricsHeat" aria-label="Traffic heatmap" />
-                <p className="chart-empty" id="metricsHeatEmpty">Waiting for traffic…</p>
+              <div className="charts-extra" data-extra-chart="dwell" hidden>
+                <ChartStyleBar styleKey="dwell" />
+                <div className="charts-plot charts-plot-tall" id="metricsDwellPlot">
+                  <canvas id="metricsDwell" aria-label="Dwell time" />
+                  <p className="chart-empty" id="metricsDwellEmpty">Waiting for dwell samples…</p>
+                </div>
               </div>
-              <div className="charts-plot" data-extra-chart="zones" hidden>
-                <canvas id="metricsZonesChart" aria-label="Zone comparison chart" />
-                <p className="chart-empty" id="metricsZonesEmpty">Draw a zone to compare.</p>
+              <div className="charts-extra" data-extra-chart="traffic" hidden>
+                <div className="charts-plot charts-plot-tall" id="metricsHeatPlot">
+                  <canvas id="metricsHeat" aria-label="Traffic heatmap" />
+                  <p className="chart-empty" id="metricsHeatEmpty">Waiting for traffic…</p>
+                </div>
+                <p className="metrics-hotspot-line" id="metricsHotspotLine" hidden />
               </div>
-              <div className="charts-walk" data-extra-chart="walk" hidden>
-                <p className="inspector-note">Path and pace only. Not face ID.</p>
-                <h3>Active tracks</h3>
-                <ul className="gait-track-list" id="gaitTrackList" />
-                <h3>Similar walks</h3>
-                <ul className="gait-match-list" id="gaitMatchList" />
+              <div className="charts-extra" data-extra-chart="compare" hidden>
+                <div className="charts-plot charts-plot-tall" id="metricsZonesPlot">
+                  <canvas id="metricsZonesChart" aria-label="Zone comparison" />
+                  <p className="chart-empty" id="metricsZonesEmpty">Pick two or more zones to compare.</p>
+                </div>
+              </div>
+              <div className="charts-extra" data-extra-chart="performance" hidden>
+                <p className="chart-style-label">Detect time</p>
+                <ChartStyleBar styleKey="perf" />
+                <div className="charts-plot charts-plot-tall" id="metricsPerfPlot">
+                  <canvas id="metricsPerf" aria-label="Detection time" />
+                  <p className="chart-empty">Waiting for detection time…</p>
+                </div>
+                <p className="chart-style-label">Frame rate</p>
+                <ChartStyleBar styleKey="fps" />
+                <div className="charts-plot charts-plot-tall" id="metricsFpsPlot">
+                  <canvas id="metricsFps" aria-label="Frames per second" />
+                  <p className="chart-empty">Waiting for frame rate…</p>
+                </div>
               </div>
             </div>
           </section>
+          <div className="follow-popup" id="followPopup" hidden>
+            <div className="follow-popup-head" id="followPopupHead">
+              <span className="follow-popup-title" id="followPopupLabel">
+                Person
+              </span>
+              <button
+                type="button"
+                className="follow-popup-close"
+                id="followPopupClose"
+                aria-label="Close follow view"
+              >
+                ×
+              </button>
+            </div>
+            <canvas id="followPopupCanvas" aria-label="Follow zoom" />
+            <div className="follow-resize" id="followResize" role="separator" aria-label="Drag to change follow camera height" />
+          </div>
         </aside>
       </main>
     </div>

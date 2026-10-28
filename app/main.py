@@ -81,7 +81,7 @@ async def stream(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "error", "message": "Detection failed."})
                 continue
 
-            tracks = tracker.update(raw, time.perf_counter(), smoothing)
+            tracks = tracker.update(raw, time.perf_counter(), smoothing, frame)
             await websocket.send_json(
                 {
                     "type": "tracks",

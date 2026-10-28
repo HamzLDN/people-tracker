@@ -8,6 +8,15 @@ import {
   tryGaitMatch,
   updateGaitProfile,
 } from "./gait.js";
+import {
+  downsampleSeries,
+  drawGroupedZoneBuckets,
+  stableChartDomain,
+  drawMultiStyledTimeSeries,
+  drawStyledBuckets,
+  drawStyledTimeSeries,
+  medianOf,
+} from "./metricsCharts.js";
 
 const TRACK_COLOR = "#4ade80";
 const ZONE_COLORS = ["#f0e07a", "#7ad7f0", "#c79bff", "#f07aa8", "#7af0b8", "#f0a37a"];
@@ -29,7 +38,8 @@ let followPopupClose;
 let followPopupLabel;
 let followPopupCanvas;
 let followPopupCtx;
-let zoneModeBtn;
+let drawBoxBtn;
+let drawLineBtn;
 let zoneClearBtn;
 let zoneList;
 let zoneHint;
@@ -50,10 +60,16 @@ let metricsEntries;
 let metricsDwell;
 let metricsZonesChart;
 let metricsHeat;
+let metricsOccupancy;
+let metricsPerf;
+let metricsFps;
 let metricsEntryCtx;
 let metricsDwellCtx;
 let metricsZonesCtx;
 let metricsHeatCtx;
+let metricsOccupancyCtx;
+let metricsPerfCtx;
+let metricsFpsCtx;
 let metricsChartEmpty;
 let metricsEntriesEmpty;
 let metricsDwellEmpty;
@@ -108,6 +124,13 @@ let saveSettingsTimer = null;
 let syncingRecentSelect = false;
 let applyingRecentSession = false;
 let combineMenuSignature = "";
+let analysisScopeSignature = "";
+const trackerUiListeners = new Set();
+let metricsRenderTick = 0;
+let lastMetricsChartRefreshMs = 0;
+let lastMetricsSummaryRefreshMs = 0;
+const METRICS_CHART_REFRESH_MS = 500;
+const METRICS_SUMMARY_REFRESH_MS = 1600;
 
 function bindDom() {
   video = document.getElementById("video");
@@ -126,7 +149,8 @@ function bindDom() {
   followPopupLabel = document.getElementById("followPopupLabel");
   followPopupCanvas = document.getElementById("followPopupCanvas");
   followPopupCtx = followPopupCanvas?.getContext("2d", { alpha: false });
-  zoneModeBtn = document.getElementById("zoneModeBtn");
+  drawBoxBtn = document.getElementById("drawBoxBtn");
+  drawLineBtn = document.getElementById("drawLineBtn");
   zoneClearBtn = document.getElementById("zoneClearBtn");
   zoneList = document.getElementById("zoneList");
   zoneHint = document.getElementById("zoneHint");
@@ -147,10 +171,16 @@ function bindDom() {
   metricsDwell = document.getElementById("metricsDwell");
   metricsZonesChart = document.getElementById("metricsZonesChart");
   metricsHeat = document.getElementById("metricsHeat");
+  metricsOccupancy = document.getElementById("metricsOccupancy");
+  metricsPerf = document.getElementById("metricsPerf");
+  metricsFps = document.getElementById("metricsFps");
   metricsEntryCtx = metricsEntries?.getContext("2d");
   metricsDwellCtx = metricsDwell?.getContext("2d");
   metricsZonesCtx = metricsZonesChart?.getContext("2d");
   metricsHeatCtx = metricsHeat?.getContext("2d");
+  metricsOccupancyCtx = metricsOccupancy?.getContext("2d");
+  metricsPerfCtx = metricsPerf?.getContext("2d");
+  metricsFpsCtx = metricsFps?.getContext("2d");
   metricsChartEmpty = document.getElementById("metricsChartEmpty");
   metricsEntriesEmpty = document.getElementById("metricsEntriesEmpty");
   metricsDwellEmpty = document.getElementById("metricsDwellEmpty");
@@ -198,6 +228,7 @@ function bindDom() {
 const HEAT_W = 28;
 const HEAT_H = 16;
 const ENTRY_BUCKET_SEC = 30;
+const ENTRY_BUCKET_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300];
 const DWELL_BINS = [
   { label: "0–2s", max: 2 },
   { label: "2–5s", max: 5 },
@@ -222,6 +253,7 @@ const state = {
   raw: [],
   tracks: new Map(),
   trails: new Map(),
+  heldTrails: new Map(),
   lastPacket: 0,
   packetMarks: [],
   detectMs: null,
@@ -248,8 +280,12 @@ const state = {
   zones: [],
   zoneNextId: 1,
   zoneMode: false,
+  zoneShape: "box",
   zoneDraft: null,
+  editingZoneId: null,
   highlightZoneId: null,
+  inspectorZonesOpen: false,
+  analyticsStep: "zones",
   metricsZoneId: null,
   metricsZoneView: null,
   metricsSelectedZoneIds: [],
@@ -262,11 +298,22 @@ const state = {
   followPopupY: null,
   gait: createGaitState(),
   trackDisplayId: new Map(),
+  extraChart: "summary",
+  chartStyles: {
+    overview: "area",
+    occupancy: "line",
+    entries: "bar",
+    dwell: "bar",
+    perf: "line",
+    fps: "line",
+  },
 };
 
 let zoneDragPointer = null;
 let zoneCornerDrag = null;
 let zoneCornerDidDrag = false;
+let zoneMoveDrag = null;
+let zoneMoveDidDrag = false;
 let followPopupDrag = null;
 let renderActive = false;
 let stageResizeObserver = null;
@@ -287,16 +334,85 @@ function clamp(value, low, high) {
   return Math.min(high, Math.max(low, value));
 }
 
+function metricsPanelActive() {
+  const inspector = document.getElementById("inspector");
+  return !!(inspector && !inspector.hidden);
+}
+
 function setPlaybackUi(active) {
   empty.hidden = active;
   document.querySelector(".app")?.classList.toggle("is-live", active);
-  if (panelMetrics) panelMetrics.hidden = !active;
   const inspector = document.getElementById("inspector");
   if (inspector) inspector.hidden = !active;
   state.metricsScopeStep = "main";
   state.metricsNavStep = "detail";
   state.metricsActiveView = "overview";
-  if (active) refreshMetrics();
+  if (active) {
+    state.inspectorZonesOpen = false;
+    state.analyticsStep = "zones";
+    if (state.metricsZoneView == null) state.metricsZoneView = "frame";
+    if (!state.sessionStartedAt) state.sessionStartedAt = performance.now();
+    syncInspector();
+    combineMenuSignature = "";
+    syncCombineMenu();
+    requestAnimationFrame(() => refreshMetrics({ forceFull: true }));
+  } else if (panelMetrics) {
+    panelMetrics.hidden = true;
+  }
+}
+
+function canProceedToAnalyticsMetrics() {
+  return true;
+}
+
+function analysisScopeIsWholeFrame() {
+  return state.metricsSelectedZoneIds.length === 0;
+}
+
+function goToAnalyticsMetricsStep() {
+  if (!canProceedToAnalyticsMetrics()) return;
+  if (state.metricsSelectedZoneIds.length) {
+    applyMetricsZoneSelection();
+  } else {
+    state.metricsZoneView = "frame";
+    state.metricsZoneId = null;
+    state.highlightZoneId = null;
+  }
+  state.inspectorZonesOpen = false;
+  state.selectedId = null;
+  state.finishedTrail = null;
+  updateFollowPopupChrome();
+  state.analyticsStep = "metrics";
+  lastMetricsChartRefreshMs = 0;
+  lastMetricsSummaryRefreshMs = 0;
+  syncInspector();
+  const selected = getSelectedZones();
+  try {
+    showExtraChart(selected.length >= 2 ? "compare" : "summary");
+    refreshMetrics({ forceFull: true });
+  } catch (err) {
+    console.error(err);
+  }
+  syncInspector();
+}
+
+function backToAnalyticsZoneStep() {
+  state.analyticsStep = "zones";
+  state.inspectorZonesOpen = false;
+  combineMenuSignature = "";
+  analysisScopeSignature = "";
+  syncInspector();
+  syncCombineMenu();
+}
+
+function handleVideoZonePick(zone) {
+  if (!zone) return;
+  state.inspectorZonesOpen = false;
+  state.selectedId = null;
+  state.finishedTrail = null;
+  updateFollowPopupChrome();
+  state.analyticsStep = "zones";
+  toggleScopeZoneById(zone.id);
 }
 
 function showSourceError(message) {
@@ -333,10 +449,15 @@ function settingsPayload() {
       id: z.id,
       name: z.name,
       color: z.color,
+      shape: z.shape === "circle" ? "circle" : z.shape === "line" ? "line" : "box",
       x: z.x,
       y: z.y,
       w: z.w,
       h: z.h,
+      cx: z.cx,
+      cy: z.cy,
+      rx: z.rx,
+      ry: z.ry,
       corners: ensureZoneCorners(z).map((c) => ({ x: c.x, y: c.y })),
     })),
     metricsSelectedZoneIds: state.metricsSelectedZoneIds,
@@ -543,25 +664,43 @@ function restoreZonesFromData(data) {
   const restored = [];
   if (!Array.isArray(data.zones)) return restored;
   for (const z of data.zones.slice(0, MAX_ZONES)) {
-    if (z == null || typeof z.id !== "number") continue;
+    if (z == null) continue;
+    const id = typeof z.id === "number" ? z.id : Number(z.id);
+    if (!Number.isFinite(id)) continue;
     const zone = {
-      id: z.id,
+      id,
       name: typeof z.name === "string" ? z.name : `Zone ${restored.length + 1}`,
       color: z.color || ZONE_COLORS[(z.id - 1) % ZONE_COLORS.length],
+      shape: z.shape === "circle" ? "circle" : z.shape === "line" ? "line" : "box",
       x: z.x ?? 0,
       y: z.y ?? 0,
       w: z.w ?? 0.1,
       h: z.h ?? 0.1,
     };
-    if (Array.isArray(z.corners) && z.corners.length === 4) {
+    if (zone.shape === "circle" && Number.isFinite(Number(z.cx)) && Number.isFinite(Number(z.cy))) {
+      zone.cx = clamp(Number(z.cx), 0, 1);
+      zone.cy = clamp(Number(z.cy), 0, 1);
+      zone.rx = Math.max(0.01, Number(z.rx) || 0.05);
+      zone.ry = Math.max(0.01, Number(z.ry) || 0.05);
+      syncCircleBounds(zone);
+    } else if (zone.shape === "line" && Array.isArray(z.corners) && z.corners.length >= 3) {
       zone.corners = z.corners.map((c) => ({
         x: clamp(c.x, 0, 1),
         y: clamp(c.y, 0, 1),
       }));
+      syncZoneAabb(zone);
     } else {
-      ensureZoneCorners(zone);
+      zone.shape = "box";
+      if (Array.isArray(z.corners) && z.corners.length === 4) {
+        zone.corners = z.corners.map((c) => ({
+          x: clamp(c.x, 0, 1),
+          y: clamp(c.y, 0, 1),
+        }));
+      } else {
+        ensureZoneCorners(zone);
+      }
+      syncZoneAabb(zone);
     }
-    syncZoneAabb(zone);
     initZoneMetrics(zone);
     restored.push(zone);
   }
@@ -606,13 +745,21 @@ function applyProfileData(data, pick) {
   if (pick.metrics && Array.isArray(data.metricsSelectedZoneIds)) {
     const ids = new Set(state.zones.map((z) => z.id));
     state.metricsSelectedZoneIds = data.metricsSelectedZoneIds.filter((id) => ids.has(id));
+    if (state.metricsSelectedZoneIds.length) applyMetricsZoneSelection();
+    else {
+      state.metricsZoneView = "frame";
+      state.metricsZoneId = null;
+    }
   }
 
   zoneListSignature = "";
   zoneMenuSignature = "";
+  combineMenuSignature = "";
+  analysisScopeSignature = "";
   syncZoneControls();
   updateZoneListUi(performance.now());
-  if (!panelMetrics.hidden) syncMetricsPickStep();
+  syncCombineMenu();
+  if (metricsPanelActive()) syncMetricsPickStep();
   sendConfig();
 }
 
@@ -710,6 +857,7 @@ async function applyRecentProfile(id, { preStream = null } = {}) {
       zoneMenuSignature = "";
       updateZoneListUi(performance.now());
       syncZoneControls();
+      syncCombineMenu();
     }
     setRecentSelectValue(profile.id);
     if (started) scheduleSaveSettings();
@@ -765,6 +913,7 @@ function resetOverlay() {
   state.raw = [];
   state.tracks.clear();
   state.trails.clear();
+  state.heldTrails.clear();
   state.lastPacket = 0;
   state.packetMarks = [];
   state.detectMs = null;
@@ -802,17 +951,19 @@ function resetCrowdMetrics() {
 }
 
 function displayTrackId(id) {
-  return state.trackDisplayId.get(id) ?? id;
-}
-
-function relinkTrackIdentity(serverId, priorIdentityId) {
-  const canon = displayTrackId(priorIdentityId);
-  if (serverId === canon) return;
-  state.trackDisplayId.set(serverId, canon);
+  return id;
 }
 
 function clearMiniCharts() {
-  for (const canvas of [metricsEntries, metricsDwell, metricsZonesChart, metricsHeat]) {
+  for (const canvas of [
+    metricsEntries,
+    metricsDwell,
+    metricsZonesChart,
+    metricsHeat,
+    metricsOccupancy,
+    metricsPerf,
+    metricsFps,
+  ]) {
     if (!canvas) continue;
     const c = canvas.getContext("2d");
     c.clearRect(0, 0, canvas.width, canvas.height);
@@ -821,20 +972,22 @@ function clearMiniCharts() {
 
 function resetPlaybackSessionForLoop() {
   resetCrowdMetrics();
+  state.sessionStartedAt = performance.now();
   state.tracks.clear();
   state.trails.clear();
+  state.heldTrails.clear();
   state.raw = [];
   state.selectedId = null;
   state.finishedTrail = null;
   send({ type: "reset" });
   updateFollowPopupChrome();
-  if (!panelMetrics.hidden) {
+  if (metricsPanelActive()) {
     refreshMetrics();
   }
 }
 
 function noteTrackLife(id, isNew) {
-  const t = sessionSeconds();
+  const t = metricsClock();
   if (isNew) {
     state.trackLife.set(id, { firstT: t, lastT: t });
     if (t >= metricsWarmupSeconds()) {
@@ -895,7 +1048,7 @@ function pushZoneCount(zone, count, t) {
 }
 
 function closeZoneTrackForAllZones(id) {
-  const t = sessionSeconds();
+  const t = metricsClock();
   for (const zone of state.zones) {
     if (!zone.stats) continue;
     const enteredAt = zone.stats.trackInside.get(id);
@@ -910,7 +1063,7 @@ function closeZoneTrackForAllZones(id) {
 
 function recordZoneMetrics(tracks) {
   if (!state.running || !state.zones.length) return;
-  const t = sessionSeconds();
+  const t = metricsClock();
   for (const zone of state.zones) {
     if (!zone.stats) initZoneMetrics(zone);
     const insideIds = new Set();
@@ -918,12 +1071,20 @@ function recordZoneMetrics(tracks) {
       const box = { x: tr.x, y: tr.y, w: tr.w, h: tr.h };
       if (personInZone(box, zone)) insideIds.add(tr.id);
     }
-    pushZoneCount(zone, insideIds.size, t);
+    const warmed = t >= metricsWarmupSeconds();
+    if (warmed) pushZoneCount(zone, insideIds.size, t);
+
+    if (warmed && zone.stats.entryTimes.length === 0) {
+      for (const id of insideIds) {
+        if (!zone.stats.trackInside.has(id)) zone.stats.trackInside.set(id, t);
+        zone.stats.entryTimes.push(t);
+      }
+    }
 
     for (const id of insideIds) {
       if (!zone.stats.trackInside.has(id)) {
         zone.stats.trackInside.set(id, t);
-        if (t >= metricsWarmupSeconds()) zone.stats.entryTimes.push(t);
+        if (warmed) zone.stats.entryTimes.push(t);
       }
     }
     for (const [id, enteredAt] of [...zone.stats.trackInside.entries()]) {
@@ -938,7 +1099,8 @@ function recordZoneMetrics(tracks) {
 }
 
 function recordHeatmap(trackList) {
-  const t = sessionSeconds();
+  if (!state.running) return;
+  const t = metricsClock();
   if (t < metricsWarmupSeconds()) return;
   for (const tr of trackList) {
     const cx = tr.x + tr.w / 2;
@@ -951,7 +1113,7 @@ function recordHeatmap(trackList) {
 
 function recordPerformance(ms) {
   if (!state.running) return;
-  const t = sessionSeconds();
+  const t = metricsClock();
   const last = state.perfHistory[state.perfHistory.length - 1];
   if (last && t < last.t - 0.08) return;
   if (last && t < last.t) return;
@@ -963,13 +1125,19 @@ function recordPerformance(ms) {
 }
 
 function metricsWarmupSeconds() {
-  return state.stream ? 1.25 : 0.75;
+  return state.stream ? 0.8 : 0.35;
+}
+
+/** Wall-clock session time for charts (keeps sampling while video plays). */
+function metricsClock() {
+  return (performance.now() - state.sessionStartedAt) / 1000;
 }
 
 function noteVideoClock() {
   if (!state.running || state.stream) return;
   const t = video.currentTime;
-  if (state.lastMetricVideoTime != null && t < state.lastMetricVideoTime - 0.08) {
+  const prev = state.lastMetricVideoTime;
+  if (prev != null && prev > 0.5 && t + 0.35 < prev) {
     resetPlaybackSessionForLoop();
   }
   state.lastMetricVideoTime = t;
@@ -1100,7 +1268,7 @@ function analyzeCrowd(history) {
 
 function recordCrowd(count) {
   if (!state.running) return;
-  const t = sessionSeconds();
+  const t = metricsClock();
   const last = state.crowdHistory[state.crowdHistory.length - 1];
   if (last && t < last.t - 0.08) {
     resetPlaybackSessionForLoop();
@@ -1116,7 +1284,7 @@ function recordCrowd(count) {
   );
 
   const tail = state.crowdHistory[state.crowdHistory.length - 1];
-  if (tail && Math.abs(tail.t - t) < 0.07 && tail.count === blended) return;
+  if (tail && Math.abs(tail.t - t) < 0.04 && tail.count === blended) return;
   state.crowdHistory.push({ t, count: blended });
   if (state.crowdHistory.length > 5000) {
     state.crowdHistory.shift();
@@ -1124,8 +1292,10 @@ function recordCrowd(count) {
 }
 
 function resizeChartCanvas(canvas, wrap) {
-  if (!canvas || !wrap) return;
+  if (!canvas || !wrap) return false;
+  if (wrap.closest("[hidden]")) return false;
   const bounds = wrap.getBoundingClientRect();
+  if (bounds.width < 8 || bounds.height < 8) return false;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const width = Math.max(1, Math.round(bounds.width * dpr));
   const height = Math.max(1, Math.round(bounds.height * dpr));
@@ -1133,6 +1303,20 @@ function resizeChartCanvas(canvas, wrap) {
     canvas.width = width;
     canvas.height = height;
   }
+  return true;
+}
+
+function chartDrawHistory(history) {
+  const sorted = [...history].sort((a, b) => a.t - b.t);
+  if (sorted.length >= 2) return sorted;
+  if (sorted.length === 1) {
+    const p = sorted[0];
+    return [
+      { t: Math.max(0, p.t - 0.15), count: p.count },
+      p,
+    ];
+  }
+  return sorted;
 }
 
 function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
@@ -1140,9 +1324,8 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
   const width = canvas.width;
   const height = canvas.height;
   ctx.clearRect(0, 0, width, height);
-  if (history.length < 2) return;
-
-  const series = [...history].sort((a, b) => a.t - b.t);
+  const series = chartDrawHistory(downsampleSeries(history));
+  if (series.length < 2) return;
   const cssWidth = canvas.clientWidth || canvas.parentElement?.clientWidth || 0;
   const scale = cssWidth > 0 ? width / cssWidth : 1;
   const pad = {
@@ -1153,16 +1336,11 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
   };
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
-  const t0 = series[0].t;
-  const t1 = series[series.length - 1].t;
-  const span = Math.max(t1 - t0, 0.25);
-  let yMax = 4;
-  for (const point of history) {
-    yMax = Math.max(yMax, point.count);
-  }
-  yMax = Math.ceil(yMax);
+  const domain = stableChartDomain(history);
+  const span = Math.max(domain.t1 - domain.t0, 0.25);
+  const { yMax } = domain;
 
-  const xAt = (t) => pad.l + ((t - t0) / span) * plotW;
+  const xAt = (t) => pad.l + ((t - domain.t0) / span) * plotW;
   const yAt = (count) => pad.t + plotH - (count / yMax) * plotH;
 
   const fontSize = Math.round(11 * scale);
@@ -1222,9 +1400,9 @@ function drawCountTimeChart(canvas, ctx, history, analysis, strokeColor) {
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "rgba(163, 158, 145, 0.9)";
-  ctx.fillText(formatAxisTime(t0), pad.l, height - 4);
+  ctx.fillText(formatAxisTime(domain.t0), pad.l, height - 4);
   ctx.textAlign = "right";
-  ctx.fillText(formatAxisTime(t1), width - pad.r, height - 4);
+  ctx.fillText(formatAxisTime(domain.t1), width - pad.r, height - 4);
 }
 
 function drawMetricsChart(history, analysis) {
@@ -1234,19 +1412,18 @@ function drawMetricsChart(history, analysis) {
 
 function drawMultiCountTimeChart(canvas, ctx, seriesList) {
   if (!canvas || !ctx) return;
-  const valid = seriesList.filter((s) => s.history.length >= 2);
+  const valid = seriesList
+    .map((s) => ({ ...s, history: chartDrawHistory(s.history) }))
+    .filter((s) => s.history.length >= 2);
   const width = canvas.width;
   const height = canvas.height;
   ctx.clearRect(0, 0, width, height);
   if (!valid.length) return;
 
   const allPoints = valid.flatMap((s) => s.history);
-  const t0 = Math.min(...allPoints.map((p) => p.t));
-  const t1 = Math.max(...allPoints.map((p) => p.t));
-  const span = Math.max(t1 - t0, 0.25);
-  let yMax = 4;
-  for (const p of allPoints) yMax = Math.max(yMax, p.count);
-  yMax = Math.ceil(yMax);
+  const domain = stableChartDomain(allPoints);
+  const span = Math.max(domain.t1 - domain.t0, 0.25);
+  const { yMax } = domain;
 
   const cssWidth = canvas.clientWidth || canvas.parentElement?.clientWidth || 0;
   const scale = cssWidth > 0 ? width / cssWidth : 1;
@@ -1258,7 +1435,7 @@ function drawMultiCountTimeChart(canvas, ctx, seriesList) {
   };
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
-  const xAt = (t) => pad.l + ((t - t0) / span) * plotW;
+  const xAt = (t) => pad.l + ((t - domain.t0) / span) * plotW;
   const yAt = (count) => pad.t + plotH - (count / yMax) * plotH;
 
   const fontSize = Math.round(11 * scale);
@@ -1295,9 +1472,9 @@ function drawMultiCountTimeChart(canvas, ctx, seriesList) {
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "rgba(163, 158, 145, 0.9)";
-  ctx.fillText(formatAxisTime(t0), pad.l, height - 4);
+  ctx.fillText(formatAxisTime(domain.t0), pad.l, height - 4);
   ctx.textAlign = "right";
-  ctx.fillText(formatAxisTime(t1), width - pad.r, height - 4);
+  ctx.fillText(formatAxisTime(domain.t1), width - pad.r, height - 4);
 }
 
 function averageCrowd(history) {
@@ -1306,25 +1483,87 @@ function averageCrowd(history) {
   return sum / history.length;
 }
 
-function updateChartEmptyStates() {
-  const history = scopedCrowdHistory();
-  const view = state.metricsZoneView;
-  let overviewReady = history.length >= 2;
-  if (view === "multi") {
-    overviewReady = getSelectedZones().some((z) => sortedZoneHistory(z).length >= 2);
+function setChartPlotReady(plotEl, ready) {
+  if (!plotEl) return;
+  plotEl.classList.toggle("is-ready", !!ready);
+  const empty = plotEl.querySelector(".chart-empty");
+  if (!empty) return;
+  if (ready) {
+    empty.hidden = true;
+    empty.style.setProperty("display", "none", "important");
+  } else {
+    empty.hidden = false;
+    empty.style.removeProperty("display");
   }
-  if (metricsChartEmpty) metricsChartEmpty.hidden = overviewReady;
-  if (metricsEntriesEmpty) metricsEntriesEmpty.hidden = scopedEntryTimes().length > 0;
+}
+
+function updateChartEmptyStates() {
+  const frameHistory = sortedCrowdHistory();
+  const history = scopedCrowdHistory();
+  let overviewReady = frameHistory.length >= 1;
+  const analysisZones = getAnalysisZones();
+  if (analysisZones.length > 1) {
+    overviewReady = analysisZones.some((z) => sortedZoneHistory(z).length >= 1);
+  } else if (analysisZones.length === 1) {
+    overviewReady = history.length >= 1;
+  } else {
+    overviewReady = frameHistory.length >= 1;
+  }
+  setChartPlotReady(document.getElementById("metricsChartPlot"), overviewReady);
+
+  const entryZones = getAnalysisZones();
+  const entriesReady = entryZones.length
+    ? entryZones.some((z) => (z.stats?.entryTimes || []).length > 0)
+    : state.entryTimes.length > 0;
+  setChartPlotReady(document.getElementById("metricsEntriesPlot"), entriesReady);
+
   const dwellTotal = scopedDwellTimes().length;
-  if (metricsDwellEmpty) metricsDwellEmpty.hidden = dwellTotal > 0;
+  setChartPlotReady(document.getElementById("metricsDwellPlot"), dwellTotal > 0);
+
   const zonesTab = zonesForMetricsZonesTab();
   const zonesChartReady =
     zonesTab.length > 0 &&
     zonesTab.some((z) => sortedZoneHistory(z).length >= 1 && (averageCrowd(sortedZoneHistory(z)) || 0) > 0);
-  if (metricsZonesEmpty) metricsZonesEmpty.hidden = zonesChartReady;
-  let heatPeak = 0;
-  for (const v of state.heatGrid) heatPeak = Math.max(heatPeak, v);
-  if (metricsHeatEmpty) metricsHeatEmpty.hidden = heatPeak > 0;
+  setChartPlotReady(document.getElementById("metricsZonesPlot"), zonesChartReady);
+
+  const { peak: heatPeak } = buildAveragedHeatGrid();
+  setChartPlotReady(
+    document.getElementById("metricsHeatPlot"),
+    heatPeak > 0 || (state.showPopulatedAreaOnVideo && getAnalysisZones().length === 0)
+  );
+
+  const occZones = getAnalysisZones();
+  const occupancyReady = occZones.length
+    ? occZones.some((z) => sortedZoneHistory(z).length >= 1)
+    : sortedCrowdHistory().length >= 1;
+  setChartPlotReady(document.getElementById("metricsOccupancyPlot"), occupancyReady);
+
+  const perfReady =
+    state.perfHistory.length >= 2 &&
+    (metricsPerf?.clientWidth || 0) >= 8 &&
+    (metricsFps?.clientWidth || 0) >= 8;
+  setChartPlotReady(document.getElementById("metricsPerfPlot"), perfReady);
+  setChartPlotReady(document.getElementById("metricsFpsPlot"), perfReady);
+  hidePlaceholdersOverDrawnCharts();
+}
+
+function hidePlaceholdersOverDrawnCharts() {
+  const zoneHistory = state.zones.some((z) => (z.stats?.history || []).length > 0);
+  const zoneEntries = state.zones.some((z) => (z.stats?.entryTimes || []).length > 0);
+  const crowd = sortedCrowdHistory().length > 0;
+  const dwell = scopedDwellTimes().length > 0;
+  const perf =
+    state.perfHistory.length >= 2 &&
+    (metricsPerf?.clientWidth || 0) >= 8 &&
+    (metricsFps?.clientWidth || 0) >= 8;
+  setChartPlotReady(document.getElementById("metricsChartPlot"), crowd || zoneHistory);
+  setChartPlotReady(document.getElementById("metricsOccupancyPlot"), zoneHistory || crowd);
+  setChartPlotReady(document.getElementById("metricsEntriesPlot"), zoneEntries || state.entryTimes.length > 0);
+  setChartPlotReady(document.getElementById("metricsDwellPlot"), dwell);
+  setChartPlotReady(document.getElementById("metricsHeatPlot"), crowd || zoneHistory);
+  setChartPlotReady(document.getElementById("metricsZonesPlot"), zoneHistory);
+  setChartPlotReady(document.getElementById("metricsPerfPlot"), perf);
+  setChartPlotReady(document.getElementById("metricsFpsPlot"), perf);
 }
 
 function activeMetricsZone() {
@@ -1335,6 +1574,20 @@ function activeMetricsZone() {
 function getSelectedZones() {
   const ids = new Set(state.metricsSelectedZoneIds);
   return state.zones.filter((z) => ids.has(z.id));
+}
+
+/** Zones currently driving analytics (empty = whole-frame scope). */
+function getAnalysisZones() {
+  if (!state.metricsSelectedZoneIds.length) return [];
+  return getSelectedZones();
+}
+
+function pointInAnyZone(nx, ny, zones) {
+  for (const zone of zones) {
+    ensureZoneStats(zone);
+    if (pointInZone(nx, ny, zone)) return true;
+  }
+  return false;
 }
 
 function toggleZoneIncluded(zoneId) {
@@ -1348,11 +1601,25 @@ function toggleZoneIncluded(zoneId) {
   scheduleSaveSettings();
 }
 
+function sameZoneId(a, b) {
+  return Number(a) === Number(b);
+}
+
+function toggleScopeZoneById(zoneId) {
+  const id = Number(zoneId);
+  if (!Number.isFinite(id)) return;
+  const ids = state.metricsSelectedZoneIds.map(Number).filter(Number.isFinite);
+  const next = ids.some((existing) => existing === id)
+    ? ids.filter((existing) => existing !== id)
+    : [...ids, id];
+  setCombinedZones(next);
+}
+
 function setCombinedZones(ids) {
-  state.metricsSelectedZoneIds = ids;
+  state.metricsSelectedZoneIds = [...new Set(ids.map(Number).filter(Number.isFinite))];
   state.metricsScopeStep = "main";
   state.metricsNavStep = "detail";
-  if (!ids.length) {
+  if (!state.metricsSelectedZoneIds.length) {
     state.metricsZoneView = "frame";
     state.metricsZoneId = null;
     state.highlightZoneId = null;
@@ -1360,56 +1627,662 @@ function setCombinedZones(ids) {
     applyMetricsZoneSelection();
   }
   combineMenuSignature = "";
+  analysisScopeSignature = "";
   zoneListSignature = "";
   updateZoneListUi(performance.now());
-  refreshMetrics();
   syncInspector();
+  try {
+    refreshMetrics();
+  } catch (err) {
+    console.error(err);
+  }
   scheduleSaveSettings();
 }
 
+function emitTrackerUi() {
+  if (!trackerUiListeners.size) return;
+  const snap = getTrackerUiSnapshot();
+  for (const listener of trackerUiListeners) listener(snap);
+}
+
 function syncCombineMenu() {
-  const host = document.getElementById("combineZoneList");
-  if (!host) return;
-  const signature = [
-    state.zones.map((z) => `${z.id}:${z.name}`).join("|"),
-    state.metricsSelectedZoneIds.join(","),
-  ].join(";");
-  if (signature === combineMenuSignature) return;
-  combineMenuSignature = signature;
-  host.replaceChildren();
-  if (!state.zones.length) return;
-  const selected = new Set(state.metricsSelectedZoneIds);
+  syncAnalysisScopeUi();
+}
+
+function analysisScopeOutOfSync() {
+  const scope = document.getElementById("analysisScope");
+  if (!scope || scope.hidden) return false;
+  if (!state.zones.length) return false;
+  const empty = document.getElementById("analysisScopeEmpty");
+  if (empty && !empty.hidden) return true;
+  const list = document.getElementById("zoneScopeList");
+  return !!(list && list.childElementCount === 0);
+}
+
+function syncAnalysisScopeUi() {
+  const scope = document.getElementById("analysisScope");
+  const list = document.getElementById("zoneScopeList");
+  const empty = document.getElementById("analysisScopeEmpty");
+  const lead = document.getElementById("analysisScopeLead");
+  if (!scope) {
+    emitTrackerUi();
+    return;
+  }
+
+  const onZonePick =
+    metricsPanelActive() && inspectorMode() === "charts" && state.analyticsStep === "zones";
+  setPaneShown(scope, onZonePick);
+  if (!onZonePick) {
+    emitTrackerUi();
+    return;
+  }
+
+  const hasZones = state.zones.length > 0;
+  if (lead) lead.hidden = !hasZones;
+  if (empty) empty.hidden = hasZones;
+  if (!list) {
+    emitTrackerUi();
+    return;
+  }
+  if (!hasZones) {
+    analysisScopeSignature = "";
+    list.replaceChildren();
+    emitTrackerUi();
+    return;
+  }
+
+  const catalogSig = state.zones.map((z) => `${z.id}:${z.name}`).join("|");
+  const selectionSig = state.metricsSelectedZoneIds.join(",");
+  const signature = `${catalogSig};${selectionSig}`;
+  const listStale = list.childElementCount === 0 && state.zones.length > 0;
+  const selected = new Set(state.metricsSelectedZoneIds.map(Number).filter(Number.isFinite));
+  const wholeFrame = analysisScopeIsWholeFrame();
+  const allSelected = selected.size === state.zones.length;
+
+  const expectedButtons = 2 + state.zones.length;
+  const canPatchSelection =
+    list.childElementCount === expectedButtons &&
+    list.querySelector(".zone-scope-frame") &&
+    list.querySelector(".zone-scope-all");
+
+  if (
+    !listStale &&
+    canPatchSelection &&
+    analysisScopeSignature.startsWith(`${catalogSig};`)
+  ) {
+    analysisScopeSignature = signature;
+    const frameBtn = list.querySelector(".zone-scope-frame");
+    const allBtn = list.querySelector(".zone-scope-all");
+    frameBtn?.classList.toggle("active", wholeFrame);
+    allBtn?.classList.toggle("active", allSelected);
+    for (const zone of state.zones) {
+      const btn = list.querySelector(`[data-zone-id="${Number(zone.id)}"]`);
+      btn?.classList.toggle("active", [...selected].some((id) => sameZoneId(id, zone.id)));
+    }
+    emitTrackerUi();
+    return;
+  }
+
+  if (signature === analysisScopeSignature && !listStale) {
+    emitTrackerUi();
+    return;
+  }
+  analysisScopeSignature = signature;
+
+  list.replaceChildren();
+
+  const frameBtn = document.createElement("button");
+  frameBtn.type = "button";
+  frameBtn.className = `zone-scope-btn zone-scope-frame${wholeFrame ? " active" : ""}`;
+  frameBtn.textContent = "Whole frame";
+  list.append(frameBtn);
+
+  const allBtn = document.createElement("button");
+  allBtn.type = "button";
+  allBtn.className = `zone-scope-btn zone-scope-all${allSelected ? " active" : ""}`;
+  allBtn.textContent = "All zones";
+  list.append(allBtn);
+
   for (const zone of state.zones) {
-    const label = document.createElement("label");
-    label.className = "combine-zone";
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = selected.has(zone.id);
-    input.addEventListener("change", () => {
-      const ids = new Set(state.metricsSelectedZoneIds);
-      if (input.checked) ids.add(zone.id);
-      else ids.delete(zone.id);
-      setCombinedZones([...ids]);
-    });
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.zoneId = String(Number(zone.id));
+    btn.className = `zone-scope-btn${[...selected].some((id) => sameZoneId(id, zone.id)) ? " active" : ""}`;
     const swatch = document.createElement("span");
     swatch.className = "zone-swatch";
     swatch.style.background = zoneColor(zone);
     const name = document.createElement("span");
     name.textContent = zone.name;
-    label.append(input, swatch, name);
-    host.append(label);
+    btn.append(swatch, name);
+    list.append(btn);
+  }
+
+  emitTrackerUi();
+}
+
+export function getTrackerUiSnapshot() {
+  const selectedIds = [...state.metricsSelectedZoneIds];
+  return {
+    zones: state.zones.map((z) => ({
+      id: z.id,
+      name: z.name,
+      color: zoneColor(z),
+    })),
+    selectedIds,
+    zoneCount: state.zones.length,
+    wholeFrame: analysisScopeIsWholeFrame(),
+    allSelected:
+      selectedIds.length === state.zones.length && state.zones.length > 0,
+    analyticsStep: state.analyticsStep,
+    showZonePicker:
+      metricsPanelActive() && inspectorMode() === "charts" && state.analyticsStep === "zones",
+  };
+}
+
+export function subscribeTrackerUi(listener) {
+  trackerUiListeners.add(listener);
+  listener(getTrackerUiSnapshot());
+  return () => trackerUiListeners.delete(listener);
+}
+
+export function trackerGoToMetrics() {
+  goToAnalyticsMetricsStep();
+}
+
+export function trackerSetWholeFrame() {
+  setCombinedZones([]);
+}
+
+export function trackerSetAllZones() {
+  setCombinedZones(state.zones.map((z) => z.id));
+}
+
+export function trackerToggleScopeZone(zoneId) {
+  const ids = new Set(state.metricsSelectedZoneIds);
+  if (ids.has(zoneId)) ids.delete(zoneId);
+  else ids.add(zoneId);
+  setCombinedZones([...ids]);
+}
+
+export function trackerStartDrawZone() {
+  state.analyticsStep = "zones";
+  setZoneMode(true);
+  syncInspector();
+}
+
+function analyticsScopeLabel() {
+  const selected = analyticsSelectedZones();
+  if (selected.length > 1) return selected.map((z) => z.name).join(" vs ");
+  if (selected.length === 1) return selected[0].name;
+  return "Whole frame";
+}
+
+function syncChartStyleButtons() {
+  for (const bar of document.querySelectorAll(".chart-style-bar")) {
+    const key = bar.dataset.styleKey;
+    if (!key) continue;
+    const style = state.chartStyles[key] || "line";
+    for (const btn of bar.querySelectorAll("[data-chart-style]")) {
+      btn.classList.toggle("active", btn.dataset.chartStyle === style);
+    }
   }
 }
 
+function setChartStyle(key, style) {
+  if (!state.chartStyles) state.chartStyles = {};
+  state.chartStyles[key] = style;
+  syncChartStyleButtons();
+  lastMetricsChartRefreshMs = 0;
+  refreshMetrics({ forceFull: false });
+}
+
+function chooseEntryBucketSec(spanSec) {
+  for (const sec of ENTRY_BUCKET_STEPS) {
+    const slots = Math.ceil(spanSec / sec) + 1;
+    if (slots >= 8 && slots <= 28) return sec;
+  }
+  for (const sec of ENTRY_BUCKET_STEPS) {
+    const slots = Math.ceil(spanSec / sec) + 1;
+    if (slots <= 32) return sec;
+  }
+  return ENTRY_BUCKET_STEPS[ENTRY_BUCKET_STEPS.length - 1];
+}
+
+function sparseTimeLabels(keys) {
+  if (keys.length <= 1) return keys.map((k) => formatAxisTime(k));
+  return keys.map((k, i) => {
+    if (i === 0 || i === keys.length - 1) return formatAxisTime(k);
+    if (keys.length <= 10) return formatAxisTime(k);
+    if (i === Math.floor(keys.length / 2)) return formatAxisTime(k);
+    return "";
+  });
+}
+
+/** Arrivals timeline with adaptive buckets and zero-filled gaps. */
+function buildEntryTimeline() {
+  const entryTimes = scopedEntryTimes().slice().sort((a, b) => a - b);
+  if (!entryTimes.length) return null;
+
+  const warmup = metricsWarmupSeconds();
+  const first = entryTimes[0];
+  const last = entryTimes[entryTimes.length - 1];
+  const sessionEnd = Math.max(sessionSeconds(), last);
+  const tMin = Math.max(warmup, Math.min(first, sessionEnd - 1));
+  let tMax = Math.max(sessionEnd, last + 0.5);
+  let span = Math.max(tMax - tMin, 2);
+
+  let bucketSec = chooseEntryBucketSec(span);
+  let start = Math.floor(tMin / bucketSec) * bucketSec;
+  let end = Math.ceil(tMax / bucketSec) * bucketSec;
+  let keys = [];
+  for (let t = start; t <= end; t += bucketSec) keys.push(t);
+
+  while (keys.length > 32) {
+    const idx = ENTRY_BUCKET_STEPS.indexOf(bucketSec);
+    const next = ENTRY_BUCKET_STEPS[Math.min(idx + 1, ENTRY_BUCKET_STEPS.length - 1)];
+    if (next === bucketSec) break;
+    bucketSec = next;
+    start = Math.floor(tMin / bucketSec) * bucketSec;
+    end = Math.ceil(tMax / bucketSec) * bucketSec;
+    keys = [];
+    for (let t = start; t <= end; t += bucketSec) keys.push(t);
+  }
+  while (keys.length < 6 && bucketSec > 1) {
+    const idx = ENTRY_BUCKET_STEPS.indexOf(bucketSec);
+    const prev = ENTRY_BUCKET_STEPS[Math.max(idx - 1, 0)];
+    if (prev === bucketSec) break;
+    bucketSec = prev;
+    start = Math.floor(tMin / bucketSec) * bucketSec;
+    end = Math.ceil(tMax / bucketSec) * bucketSec;
+    keys = [];
+    for (let t = start; t <= end; t += bucketSec) keys.push(t);
+  }
+
+  const values = keys.map(() => 0);
+  for (const t of entryTimes) {
+    let idx = Math.floor((t - start) / bucketSec);
+    if (idx < 0) idx = 0;
+    if (idx >= values.length) idx = values.length - 1;
+    values[idx] += 1;
+  }
+
+  const series = keys.map((k, i) => ({
+    t: k + bucketSec / 2,
+    count: values[i],
+  }));
+  const peak = Math.max(...values);
+  const peakIdx = values.indexOf(peak);
+  let cumulative = 0;
+  const cumulativeSeries = keys.map((k, i) => {
+    cumulative += values[i];
+    return { t: k + bucketSec / 2, count: cumulative };
+  });
+
+  return {
+    labels: sparseTimeLabels(keys),
+    values,
+    series,
+    cumulativeSeries,
+    bucketSec,
+    total: entryTimes.length,
+    peak,
+    peakAt: keys[peakIdx] ?? first,
+    t0: keys[0],
+    t1: keys[keys.length - 1] + bucketSec,
+  };
+}
+
+function formatBucketDuration(sec) {
+  if (sec >= 60) {
+    const m = sec / 60;
+    return Number.isInteger(m) ? `${m} min` : `${m.toFixed(1)} min`;
+  }
+  return `${sec}s`;
+}
+
+function refreshEntriesCaption(data) {
+  const el = document.getElementById("metricsEntriesCaption");
+  if (!el) return;
+  if (!data) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  const activeBuckets = data.values.filter((v) => v > 0).length;
+  const scope = analyticsScopeLabel();
+  el.textContent = `${scope} · ${data.total} entries · ${formatBucketDuration(data.bucketSec)} windows · peak ${data.peak} at ${formatClock(data.peakAt)}`;
+}
+
+function buildMultiZoneEntryBuckets(zones) {
+  const timelines = zones.map((zone) => {
+    ensureZoneStats(zone);
+    const entryTimes = [...(zone.stats?.entryTimes || [])].sort((a, b) => a - b);
+    return { zone, entryTimes };
+  });
+  const allTimes = timelines.flatMap((t) => t.entryTimes);
+  if (!allTimes.length) return null;
+
+  const warmup = metricsWarmupSeconds();
+  const first = Math.min(...allTimes);
+  const last = Math.max(...allTimes);
+  const sessionEnd = Math.max(sessionSeconds(), last);
+  const tMin = Math.max(warmup, Math.min(first, sessionEnd - 1));
+  const tMax = Math.max(sessionEnd, last + 0.5);
+  const span = Math.max(tMax - tMin, 2);
+  let bucketSec = chooseEntryBucketSec(span);
+  let start = Math.floor(tMin / bucketSec) * bucketSec;
+  let end = Math.ceil(tMax / bucketSec) * bucketSec;
+  let keys = [];
+  for (let t = start; t <= end; t += bucketSec) keys.push(t);
+  while (keys.length > 32) {
+    const idx = ENTRY_BUCKET_STEPS.indexOf(bucketSec);
+    bucketSec = ENTRY_BUCKET_STEPS[Math.min(idx + 1, ENTRY_BUCKET_STEPS.length - 1)];
+    start = Math.floor(tMin / bucketSec) * bucketSec;
+    end = Math.ceil(tMax / bucketSec) * bucketSec;
+    keys = [];
+    for (let t = start; t <= end; t += bucketSec) keys.push(t);
+  }
+  while (keys.length < 6 && bucketSec > 1) {
+    const idx = ENTRY_BUCKET_STEPS.indexOf(bucketSec);
+    bucketSec = ENTRY_BUCKET_STEPS[Math.max(idx - 1, 0)];
+    start = Math.floor(tMin / bucketSec) * bucketSec;
+    end = Math.ceil(tMax / bucketSec) * bucketSec;
+    keys = [];
+    for (let t = start; t <= end; t += bucketSec) keys.push(t);
+  }
+
+  const zoneSeries = timelines.map(({ zone, entryTimes }) => {
+    const values = keys.map(() => 0);
+    for (const t of entryTimes) {
+      let idx = Math.floor((t - start) / bucketSec);
+      if (idx < 0) idx = 0;
+      if (idx >= values.length) idx = values.length - 1;
+      values[idx] += 1;
+    }
+    return {
+      zone,
+      color: zoneColor(zone),
+      label: zone.name,
+      values,
+      total: entryTimes.length,
+    };
+  });
+
+  return {
+    labels: sparseTimeLabels(keys),
+    zoneSeries,
+    bucketSec,
+  };
+}
+
+function syncChartZoneLegend() {
+  const el = document.getElementById("chartZoneLegend");
+  if (!el || state.analyticsStep !== "metrics") {
+    if (el) el.replaceChildren();
+    return;
+  }
+  el.replaceChildren();
+  const zones = getAnalysisZones();
+  if (!zones.length) {
+    const hint = document.createElement("p");
+    hint.className = "chart-zone-legend-hint";
+    hint.textContent = state.zones.length
+      ? "No zones selected — charts show the whole frame. Use Change zones to pick one or more areas."
+      : "Draw zones on the video, then choose them before Next to filter metrics.";
+    el.append(hint);
+    return;
+  }
+  for (const zone of zones) {
+    const item = document.createElement("span");
+    item.className = "chart-legend-item";
+    const swatch = document.createElement("span");
+    swatch.className = "zone-swatch";
+    swatch.style.background = zoneColor(zone);
+    const name = document.createElement("span");
+    name.textContent = zone.name;
+    item.append(swatch, name);
+    el.append(item);
+  }
+}
+
+function dwellBucketData() {
+  const counts = DWELL_BINS.map(() => 0);
+  for (const dwell of scopedDwellTimes()) {
+    for (let i = 0; i < DWELL_BINS.length; i += 1) {
+      const low = i === 0 ? 0 : DWELL_BINS[i - 1].max;
+      const high = DWELL_BINS[i].max;
+      if (high === Infinity) {
+        if (dwell >= low) counts[i] += 1;
+        break;
+      }
+      if (dwell >= low && dwell < high) {
+        counts[i] += 1;
+        break;
+      }
+    }
+  }
+  return {
+    labels: DWELL_BINS.map((b) => b.label),
+    values: counts,
+    total: counts.reduce((a, b) => a + b, 0),
+  };
+}
+
+function refreshSummaryPanel(at = performance.now()) {
+  const grid = document.getElementById("metricsKpiGrid");
+  const list = document.getElementById("metricsInsightList");
+  if (!grid) return;
+
+  const history = scopedCrowdHistory();
+  const analysis = analyzeCrowd(history);
+  const avg = averageCrowd(history);
+  const peak = history.length ? Math.max(...history.map((p) => p.count)) : null;
+  const zones = getAnalysisZones();
+  const nowVal = scopedLiveCount();
+  const now =
+    zones.length > 1
+      ? null
+      : nowVal != null
+        ? nowVal
+        : history.length
+          ? history[history.length - 1].count
+          : null;
+  const entries = scopedEntryTimes();
+  const dwells = scopedDwellTimes();
+  const medDwell = dwells.length ? medianOf(dwells) : null;
+  const unique = scopedUniqueCount();
+  const duration = sessionSeconds();
+  const detectAvg = avgDetectMs();
+  const lastPerf = state.perfHistory[state.perfHistory.length - 1];
+
+  if (zones.length > 1) {
+    grid.replaceChildren();
+    for (const zone of zones) {
+      const summary = zoneSummaryStats(zone, at);
+      const card = document.createElement("div");
+      card.className = "metrics-kpi metrics-kpi-zone";
+      const head = document.createElement("div");
+      head.className = "metrics-kpi-zone-head";
+      const swatch = document.createElement("span");
+      swatch.className = "zone-swatch";
+      swatch.style.background = zoneColor(zone);
+      const title = document.createElement("strong");
+      title.textContent = zone.name;
+      head.append(swatch, title);
+      const meta = document.createElement("p");
+      meta.className = "metrics-kpi-zone-meta";
+      const avgText = summary.avg != null ? summary.avg.toFixed(1) : "—";
+      meta.textContent = `Now ${summary.now} · Avg ${avgText} · ${summary.entries} entries · Peak ${summary.busiest}`;
+      card.append(head, meta);
+      grid.append(card);
+    }
+    if (list) {
+      list.replaceChildren();
+      const ranked = zones
+        .map((zone) => ({
+          zone,
+          avg: averageCrowd(sortedZoneHistory(zone)) || 0,
+          entries: zone.stats?.entryTimes.length || 0,
+        }))
+        .sort((a, b) => b.avg - a.avg);
+      const top = ranked[0];
+      const li = document.createElement("li");
+      li.textContent =
+        top && top.avg > 0
+          ? `${top.zone.name} is the busiest so far (avg ${top.avg.toFixed(1)}, ${top.entries} entries).`
+          : "Counts fill in as people move through the selected zones.";
+      list.append(li);
+    }
+    return;
+  }
+
+  const cards = [
+    { label: "Scope", value: analyticsScopeLabel() },
+    { label: "Now in scope", value: now != null ? String(now) : "—" },
+    { label: "Average", value: avg != null ? avg.toFixed(1) : "—" },
+    { label: "Peak", value: peak != null ? String(peak) : "—" },
+    { label: "Unique seen", value: unique ? String(unique) : "—" },
+    { label: "Arrivals", value: entries.length ? String(entries.length) : "—" },
+    {
+      label: "Median dwell",
+      value: medDwell != null ? `${medDwell.toFixed(1)}s` : "—",
+    },
+    { label: "Session", value: formatClock(duration) },
+    {
+      label: "Detect (avg)",
+      value: detectAvg != null ? `${Math.round(detectAvg)} ms` : "—",
+    },
+    {
+      label: "Process rate",
+      value: lastPerf?.fps != null ? `${lastPerf.fps.toFixed(1)} fps` : "—",
+    },
+  ];
+
+  grid.replaceChildren();
+  for (const card of cards) {
+    const el = document.createElement("div");
+    el.className = "metrics-kpi";
+    const lab = document.createElement("span");
+    lab.className = "metrics-kpi-label";
+    lab.textContent = card.label;
+    const val = document.createElement("strong");
+    val.className = "metrics-kpi-value";
+    val.textContent = card.value;
+    el.append(lab, val);
+    grid.append(el);
+  }
+
+  if (!list) return;
+  list.replaceChildren();
+  const insights = [];
+  if (analysis?.peakTime != null) {
+    insights.push(
+      `Peak occupancy ${Math.round(analysis.peakCount)} at ${formatClock(analysis.peakTime)}.`
+    );
+  }
+  if (analysis?.rampTime != null) {
+    insights.push(`Build-up detected from ${formatClock(analysis.rampTime)}.`);
+  }
+  const busiest = metricsBusiestArea?.textContent?.trim();
+  if (busiest && busiest !== "—") {
+    insights.push(`Busiest area: ${busiest}.`);
+  }
+  if (!insights.length) {
+    const li = document.createElement("li");
+    li.textContent = "Keep the feed running to populate summary insights.";
+    list.append(li);
+    return;
+  }
+  for (const text of insights) {
+    const li = document.createElement("li");
+    li.textContent = text;
+    list.append(li);
+  }
+}
+
+function refreshMetricsZoneTable(now = performance.now()) {
+  const wrap = document.getElementById("metricsZoneTableWrap");
+  const body = document.getElementById("metricsZoneTableBody");
+  if (!wrap || !body) return;
+  const zones = zonesForMetricsZonesTab();
+  if (!zones.length) {
+    wrap.hidden = true;
+    body.replaceChildren();
+    return;
+  }
+  wrap.hidden = false;
+  body.replaceChildren();
+  for (const zone of zones) {
+    const summary = zoneSummaryStats(zone, now);
+    const peak = summary.peak != null ? summary.peak : "—";
+    const tr = document.createElement("tr");
+    for (const cell of [
+      zone.name,
+      String(summary.now),
+      summary.avg != null ? summary.avg.toFixed(1) : "—",
+      String(peak),
+      String(summary.entries),
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = cell;
+      tr.append(td);
+    }
+    body.append(tr);
+  }
+}
+
+function updateHotspotLine() {
+  const line = document.getElementById("metricsHotspotLine");
+  if (!line) return;
+  const hotspot = heatmapHotspot();
+  if (hotspot) {
+    line.hidden = false;
+    line.textContent = `Busiest foot traffic: ${hotspot.label} of frame.`;
+  } else {
+    line.hidden = true;
+  }
+}
+
+function resolveExtraChartTab(name) {
+  const alias = {
+    entries: "arrivals",
+    heat: "traffic",
+    zones: "compare",
+  };
+  let next = alias[name] || name;
+  if (next === "compare" && state.zones.length === 0) next = "summary";
+  const views = [...document.querySelectorAll("[data-extra-chart]")];
+  const available = new Set(views.map((v) => v.dataset.extraChart));
+  if (!available.has(next)) {
+    next = available.has("summary") ? "summary" : views[0]?.dataset.extraChart || "summary";
+  }
+  return next;
+}
+
 function showExtraChart(name) {
-  state.extraChart = name;
+  const next = resolveExtraChartTab(name);
+  state.extraChart = next;
   for (const view of document.querySelectorAll("[data-extra-chart]")) {
-    view.hidden = view.dataset.extraChart !== name;
+    view.hidden = view.dataset.extraChart !== next;
   }
   for (const btn of document.querySelectorAll("[data-extra-tab]")) {
-    btn.classList.toggle("active", btn.dataset.extraTab === name);
+    if (btn.dataset.extraTab === "compare") {
+      btn.hidden = state.zones.length === 0;
+    }
+    btn.classList.toggle("active", btn.dataset.extraTab === next);
   }
+  syncAnalysisScopeUi();
+  syncChartStyleButtons();
   refreshMetrics();
+  requestAnimationFrame(() => {
+    if (state.extraChart === next) refreshMetrics();
+  });
+}
+
+function inspectorMode() {
+  if (state.inspectorZonesOpen && state.zones.length > 0) return "zones";
+  return "charts";
 }
 
 function updateZoneMetricsNextButton() {
@@ -1432,9 +2305,14 @@ function applyMetricsZoneSelection() {
     state.metricsZoneView = "zone";
     state.metricsZoneId = ids[0];
     state.highlightZoneId = ids[0];
-  } else {
+  } else if (ids.length > 1) {
     state.metricsZoneView = "multi";
     state.metricsZoneId = null;
+    state.highlightZoneId = null;
+  } else {
+    state.metricsZoneView = "frame";
+    state.metricsZoneId = null;
+    state.highlightZoneId = null;
   }
   zoneListSignature = "";
 }
@@ -1456,7 +2334,6 @@ const METRIC_VIEW_LABELS = {
   crowd: "Crowd",
   traffic: "Traffic",
   zones: "Zones",
-  walk: "Walk",
 };
 
 function showMetricsMenu() {
@@ -1529,35 +2406,37 @@ function metricsScopeIsZone() {
 }
 
 function scopedCrowdHistory() {
-  const view = state.metricsZoneView;
-  if (view === "zone") {
-    const z = activeMetricsZone();
-    return z ? sortedZoneHistory(z) : [];
-  }
-  return sortedCrowdHistory();
+  const zones = getAnalysisZones();
+  if (!zones.length) return sortedCrowdHistory();
+  if (zones.length === 1) return sortedZoneHistory(zones[0]);
+  return [];
 }
 
 function scopedEntryTimes() {
-  if (state.metricsZoneView === "zone") {
-    const z = activeMetricsZone();
-    return z?.stats?.entryTimes || [];
+  const zones = getAnalysisZones();
+  if (zones.length) {
+    return zones.flatMap((z) => z.stats?.entryTimes || []);
   }
   return state.entryTimes;
 }
 
 function scopedDwellTimes() {
-  if (state.metricsZoneView === "zone") {
-    const z = activeMetricsZone();
-    return z?.stats?.dwellTimes || [];
+  const zones = getAnalysisZones();
+  if (zones.length) {
+    return zones.flatMap((z) => z.stats?.dwellTimes || []);
   }
   return state.dwellTimes;
 }
 
 function scopedUniqueCount() {
-  if (state.metricsZoneView === "zone") {
-    const z = activeMetricsZone();
-    if (!z?.stats) return 0;
-    return z.stats.dwellTimes.length + z.stats.trackInside.size;
+  const zones = getAnalysisZones();
+  if (zones.length) {
+    let n = 0;
+    for (const z of zones) {
+      if (!z.stats) continue;
+      n += z.stats.dwellTimes.length + z.stats.trackInside.size;
+    }
+    return n;
   }
   return state.dwellTimes.length + state.trackLife.size;
 }
@@ -1579,17 +2458,30 @@ function zoneSummaryStats(zone, now = performance.now()) {
   const history = sortedZoneHistory(zone);
   const analysis = analyzeCrowd(history);
   const avg = averageCrowd(history);
+  const peak = history.length ? Math.max(...history.map((p) => p.count)) : null;
   let busiest = "—";
   if (analysis) {
     const peakLabel =
       analysis.peakCount === 1 ? "1" : String(Math.round(analysis.peakCount));
     busiest = `${peakLabel} @ ${formatClock(analysis.peakTime)}`;
+  } else if (peak != null) {
+    busiest = String(peak);
   }
+  const live = zoneLiveCount(zone, now);
+  const latest = history.length ? history[history.length - 1].count : 0;
+  const nowCount = state.tracks.size ? live : latest;
+  const peakCount = history.length
+    ? Math.max(...history.map((point) => point.count), nowCount)
+    : nowCount > 0
+      ? nowCount
+      : null;
+  if (!analysis && peakCount != null) busiest = String(peakCount);
   return {
-    now: zoneLiveCount(zone, now),
-    avg,
+    now: nowCount,
+    avg: avg != null ? avg : nowCount > 0 ? nowCount : null,
     entries: zone.stats?.entryTimes.length || 0,
     busiest,
+    peak: peakCount,
     analysis,
     history,
   };
@@ -1654,6 +2546,54 @@ function sortedZoneHistory(zone) {
   return [...zone.stats.history].sort((a, b) => a.t - b.t);
 }
 
+function scopedLiveCount(now = performance.now()) {
+  const zones = getAnalysisZones();
+  if (!zones.length) {
+    const history = sortedCrowdHistory();
+    return history.length ? history[history.length - 1].count : 0;
+  }
+  if (zones.length === 1) return zoneLiveCount(zones[0], now);
+  return null;
+}
+
+function analyticsSelectedZones() {
+  if (analysisScopeIsWholeFrame()) return [];
+  return getSelectedZones();
+}
+
+function syncAnalyticsScopeSummary() {
+  const bar = document.getElementById("analyticsScopeSummary");
+  const chips = document.getElementById("analyticsZoneChips");
+  if (!bar || !chips) return;
+  const onMetrics = state.analyticsStep === "metrics";
+  const selected = analyticsSelectedZones();
+  if (!onMetrics) {
+    bar.hidden = true;
+    chips.replaceChildren();
+    return;
+  }
+  bar.hidden = false;
+  chips.replaceChildren();
+  if (!selected.length) {
+    const pill = document.createElement("span");
+    pill.className = "analytics-scope-pill analytics-scope-pill-frame";
+    pill.textContent = "Whole frame";
+    chips.append(pill);
+    return;
+  }
+  for (const zone of selected) {
+    const pill = document.createElement("span");
+    pill.className = "analytics-scope-pill";
+    const swatch = document.createElement("span");
+    swatch.className = "zone-swatch";
+    swatch.style.background = zoneColor(zone);
+    const name = document.createElement("span");
+    name.textContent = zone.name;
+    pill.append(swatch, name);
+    chips.append(pill);
+  }
+}
+
 function zonePersonSeconds(zone) {
   const history = sortedZoneHistory(zone);
   if (history.length < 2) return 0;
@@ -1700,10 +2640,20 @@ function buildAveragedHeatGrid() {
   const duration = heatmapTrackingDurationSec();
   const grid = new Float32Array(HEAT_W * HEAT_H);
   let peak = 0;
-  for (let i = 0; i < state.heatGrid.length; i += 1) {
-    const v = state.heatGrid[i] / duration;
-    grid[i] = v;
-    if (v > peak) peak = v;
+  const zones = getAnalysisZones();
+  const maskZones = zones.length > 0;
+  for (let y = 0; y < HEAT_H; y += 1) {
+    for (let x = 0; x < HEAT_W; x += 1) {
+      const i = y * HEAT_W + x;
+      if (maskZones) {
+        const nx = (x + 0.5) / HEAT_W;
+        const ny = (y + 0.5) / HEAT_H;
+        if (!pointInAnyZone(nx, ny, zones)) continue;
+      }
+      const v = state.heatGrid[i] / duration;
+      grid[i] = v;
+      if (v > peak) peak = v;
+    }
   }
   return { grid, peak, duration };
 }
@@ -1735,20 +2685,15 @@ function heatmapHotspot() {
 }
 
 function zonesForPopulationReport() {
-  if (state.metricsZoneView === "frame") return [];
-  if (state.metricsScopeStep === "main" && state.metricsSelectedZoneIds.length) {
-    return getSelectedZones();
-  }
-  return state.zones;
+  const selected = getAnalysisZones();
+  if (selected.length) return selected;
+  return [];
 }
 
 function zonesForMetricsZonesTab() {
-  if (!state.zones.length) return [];
-  if (state.metricsZoneView === "frame") return state.zones;
-  if (state.metricsScopeStep === "main" && state.metricsSelectedZoneIds.length) {
-    return getSelectedZones();
-  }
-  return state.zones;
+  const selected = getAnalysisZones();
+  if (selected.length) return selected;
+  return [];
 }
 
 function formatBusiestAreaSummary(leader, hotspot) {
@@ -1862,62 +2807,242 @@ function syncMetricsPickStep() {
   updateZoneMetricsNextButton();
 }
 
+function drawOverviewSingleSeries(history, analysis, color) {
+  if (!metricsChart || !metricsCtx || history.length < 1) return false;
+  const overviewStyle = state.chartStyles?.overview || "area";
+  if (overviewStyle === "area") {
+    drawCountTimeChart(metricsChart, metricsCtx, history, analysis, color);
+  } else {
+    drawStyledTimeSeries(
+      metricsChart,
+      metricsCtx,
+      history,
+      color,
+      overviewStyle,
+      formatAxisTime
+    );
+  }
+  return true;
+}
+
 function drawOverviewChart() {
-  const view = state.metricsZoneView;
   resizeChartCanvas(metricsChart, metricsChartWrap);
-  if (view === "multi") {
-    const seriesList = getSelectedZones().map((zone) => ({
+  const plot = document.getElementById("metricsChartPlot");
+  const analysisZones = getAnalysisZones();
+  if (analysisZones.length > 1) {
+    const seriesList = analysisZones.map((zone) => ({
       history: sortedZoneHistory(zone),
       color: zoneColor(zone),
       label: zone.name,
     }));
-    drawMultiCountTimeChart(metricsChart, metricsCtx, seriesList);
+    const overviewStyle = state.chartStyles?.overview || "area";
+    const styleForMulti = overviewStyle === "area" ? "line" : overviewStyle;
+    const ok = drawMultiStyledTimeSeries(
+      metricsChart,
+      metricsCtx,
+      seriesList,
+      styleForMulti,
+      formatAxisTime
+    );
+    setChartPlotReady(plot, ok && seriesList.some((s) => s.history.length >= 1));
     return;
   }
-  const history = scopedCrowdHistory();
+
+  if (analysisZones.length === 1) {
+    const zone = analysisZones[0];
+    const history = sortedZoneHistory(zone);
+    const analysis = analyzeCrowd(history);
+    if (drawOverviewSingleSeries(history, analysis, zoneColor(zone))) {
+      setChartPlotReady(plot, true);
+    } else {
+      metricsCtx.clearRect(0, 0, metricsChart.width, metricsChart.height);
+      setChartPlotReady(plot, false);
+    }
+    return;
+  }
+
+  const history = sortedCrowdHistory();
   const analysis = analyzeCrowd(history);
-  const color =
-    view === "zone" && activeMetricsZone() ? zoneColor(activeMetricsZone()) : "#d6ee6a";
-  if (history.length >= 2) {
-    drawCountTimeChart(metricsChart, metricsCtx, history, analysis, color);
+  if (drawOverviewSingleSeries(history, analysis, "#d6ee6a")) {
+    setChartPlotReady(plot, true);
   } else {
     metricsCtx.clearRect(0, 0, metricsChart.width, metricsChart.height);
+    setChartPlotReady(plot, false);
   }
 }
 
-function refreshMetrics() {
-  if (!metricsChart || !metricsCtx) return;
+function cumulativeEntryHistory(zone) {
+  ensureZoneStats(zone);
+  const times = [...(zone.stats?.entryTimes || [])].sort((a, b) => a - b);
+  if (!times.length) return [];
+  let n = 0;
+  const series = times.map((t) => ({ t, count: (n += 1) }));
+  if (series.length === 1) {
+    series.unshift({ t: Math.max(0, series[0].t - 0.2), count: 0 });
+  }
+  return series;
+}
+
+function drawOccupancyChart() {
+  if (!metricsOccupancy || !metricsOccupancyCtx) return;
+  resizeChartCanvas(metricsOccupancy, metricsOccupancy.parentElement);
+  const zones = getAnalysisZones();
+  if (zones.length > 1) {
+    const seriesList = zones.map((zone) => ({
+      history: sortedZoneHistory(zone),
+      color: zoneColor(zone),
+      label: zone.name,
+    }));
+    const style = state.chartStyles?.occupancy || "line";
+    drawMultiStyledTimeSeries(
+      metricsOccupancy,
+      metricsOccupancyCtx,
+      seriesList,
+      style,
+      formatAxisTime
+    );
+    return;
+  }
+  const history = scopedCrowdHistory();
+  const color = zones.length === 1 ? zoneColor(zones[0]) : "#d6ee6a";
+  const style = state.chartStyles?.occupancy || "line";
+  const ok = drawStyledTimeSeries(
+    metricsOccupancy,
+    metricsOccupancyCtx,
+    history,
+    color,
+    style,
+    formatAxisTime
+  );
+  if (!ok) {
+    metricsOccupancyCtx.clearRect(0, 0, metricsOccupancy.width, metricsOccupancy.height);
+  }
+}
+
+function drawPerformanceCharts() {
+  const perfStyle = state.chartStyles?.perf || "line";
+  const fpsStyle = state.chartStyles?.fps || "line";
+  const msSeries = state.perfHistory
+    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.ms))
+    .map((p) => ({ t: p.t, count: p.ms }));
+  const fpsSeries = state.perfHistory
+    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.fps))
+    .map((p) => ({ t: p.t, count: p.fps }));
+
+  if (metricsPerf && metricsPerfCtx && resizeChartCanvas(metricsPerf, metricsPerf.parentElement)) {
+    const ok = drawStyledTimeSeries(
+      metricsPerf,
+      metricsPerfCtx,
+      msSeries,
+      "#f0a37a",
+      perfStyle,
+      formatAxisTime
+    );
+    if (!ok) metricsPerfCtx.clearRect(0, 0, metricsPerf.width, metricsPerf.height);
+  }
+  if (metricsFps && metricsFpsCtx && resizeChartCanvas(metricsFps, metricsFps.parentElement)) {
+    const ok = drawStyledTimeSeries(
+      metricsFps,
+      metricsFpsCtx,
+      fpsSeries,
+      "#7ad7f0",
+      fpsStyle,
+      formatAxisTime
+    );
+    if (!ok) metricsFpsCtx.clearRect(0, 0, metricsFps.width, metricsFps.height);
+  }
+}
+
+function updateChartScopeLabel() {
+  const scope = document.getElementById("chartScope");
+  if (!scope) return;
+  const analysisZones = getAnalysisZones();
+  if (analysisZones.length > 1) {
+    scope.textContent = analysisZones.map((z) => z.name).join(" vs ");
+  } else if (analysisZones.length === 1) {
+    scope.textContent = analysisZones[0].name;
+  } else {
+    scope.textContent = "Whole frame";
+  }
+}
+
+function refreshMetrics(options = {}) {
+  const forceFull = options.forceFull === true;
+  const now = performance.now();
+  const refreshSummary =
+    forceFull || now - lastMetricsSummaryRefreshMs >= METRICS_SUMMARY_REFRESH_MS;
+
+  if (refreshSummary) {
+    lastMetricsSummaryRefreshMs = now;
+    try {
+      refreshPopulationInsights();
+      refreshSummaryPanel(now);
+      refreshMetricsZoneTable(now);
+      updateHotspotLine();
+      refreshZonesMetricsPanel();
+      refreshGaitPanel();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  if (!metricsChart || !metricsCtx) {
+    try {
+      drawPerformanceCharts();
+      updateChartEmptyStates();
+    } catch (err) {
+      console.error(err);
+    }
+    return;
+  }
+
   state.metricsScopeStep = "main";
   state.metricsNavStep = "detail";
 
   const history = scopedCrowdHistory();
   const analysis = analyzeCrowd(history);
 
-  if (analysis && metricsBusiest) {
-    const peakLabel =
-      analysis.peakCount === 1 ? "1 person" : `${Math.round(analysis.peakCount)} people`;
-    metricsBusiest.textContent = `${peakLabel} at ${formatClock(analysis.peakTime)}`;
-    if (metricsSummary) metricsSummary.textContent = "";
-  } else {
-    if (metricsSummary) metricsSummary.textContent = "Counting… keep the video running.";
-    if (metricsBusiest) metricsBusiest.textContent = "—";
+  if (metricsSummary) {
+    metricsSummary.textContent = analysis
+      ? ""
+      : "Counting… keep the video running.";
   }
+  try {
+    updateChartScopeLabel();
+    drawOverviewChart();
+    drawOccupancyChart();
+    drawEntryChart();
+    drawDwellChart();
+    drawZonesCompareChart();
+    drawHeatChart();
+    drawPerformanceCharts();
+    updateChartEmptyStates();
+  } catch (err) {
+    console.error(err);
+  }
+  syncAnalyticsScopeSummary();
+  syncChartZoneLegend();
+  syncChartStyleButtons();
+}
 
-  const avg = averageCrowd(history);
-  if (statUnique) {
-    const n = scopedUniqueCount();
-    statUnique.textContent = n > 0 ? String(n) : "—";
+function maybeRefreshSummaryFromFrame(now) {
+  if (!metricsPanelActive() || state.analyticsStep !== "metrics") return;
+  if (now - lastMetricsSummaryRefreshMs < 400) return;
+  lastMetricsSummaryRefreshMs = now;
+  try {
+    refreshSummaryPanel(now);
+    refreshMetricsZoneTable(now);
+  } catch (err) {
+    console.error(err);
   }
-  if (statAvg) statAvg.textContent = avg != null ? avg.toFixed(1) : "—";
-  drawOverviewChart();
-  drawEntryChart();
-  drawDwellChart();
-  drawZonesCompareChart();
-  drawHeatChart();
-  updateChartEmptyStates();
-  refreshPopulationInsights();
-  refreshZonesMetricsPanel();
-  refreshGaitPanel();
+}
+
+function maybeRefreshMetricsFromVideoFrame() {
+  if (!metricsPanelActive() || state.analyticsStep !== "metrics") return;
+  const now = performance.now();
+  if (now - lastMetricsChartRefreshMs < METRICS_CHART_REFRESH_MS) return;
+  lastMetricsChartRefreshMs = now;
+  refreshMetrics({ full: false });
 }
 
 function chartScale(canvas) {
@@ -1940,119 +3065,138 @@ function fitCanvas(canvas, ctx, cssHeight = 92) {
 function drawEntryChart() {
   if (!metricsEntries || !metricsEntryCtx) return;
   resizeChartCanvas(metricsEntries, metricsEntries.parentElement);
-  const { width, height } = metricsEntries;
-  const scale = chartScale(metricsEntries);
-  metricsEntryCtx.clearRect(0, 0, width, height);
-  const entryTimes = scopedEntryTimes();
-  if (!entryTimes.length) return;
-
-  const bucketMap = new Map();
-  for (const t of entryTimes) {
-    const key = Math.floor(t / ENTRY_BUCKET_SEC) * ENTRY_BUCKET_SEC;
-    bucketMap.set(key, (bucketMap.get(key) || 0) + 1);
+  const zones = getAnalysisZones();
+  if (zones.length > 1) {
+    const style = state.chartStyles?.entries || "bar";
+    const el = document.getElementById("metricsEntriesCaption");
+    if (style === "bar") {
+      const grouped = buildMultiZoneEntryBuckets(zones);
+      if (el) {
+        el.hidden = !grouped;
+        if (grouped) {
+          const totals = grouped.zoneSeries.map((z) => `${z.label} ${z.total}`).join(" · ");
+          el.textContent = `Arrivals by zone (colored bars) · ${totals}`;
+        }
+      }
+      if (grouped) {
+        drawGroupedZoneBuckets(
+          metricsEntries,
+          metricsEntryCtx,
+          grouped.labels,
+          grouped.zoneSeries
+        );
+      } else {
+        metricsEntryCtx.clearRect(0, 0, metricsEntries.width, metricsEntries.height);
+      }
+      return;
+    }
+    if (el) {
+      el.hidden = false;
+      el.textContent = `Arrivals by zone — ${zones.map((z) => z.name).join(", ")}`;
+    }
+    const seriesList = zones.map((zone) => ({
+      history: cumulativeEntryHistory(zone),
+      color: zoneColor(zone),
+      label: zone.name,
+    }));
+    const ok = drawMultiStyledTimeSeries(
+      metricsEntries,
+      metricsEntryCtx,
+      seriesList,
+      style,
+      formatAxisTime
+    );
+    if (!ok) metricsEntryCtx.clearRect(0, 0, metricsEntries.width, metricsEntries.height);
+    setChartPlotReady(document.getElementById("metricsEntriesPlot"), ok);
+    return;
   }
-  const keys = [...bucketMap.keys()].sort((a, b) => a - b);
-  const values = keys.map((k) => bucketMap.get(k));
-  const maxVal = Math.max(1, ...values);
-  const pad = {
-    l: Math.round(8 * scale),
-    r: Math.round(8 * scale),
-    t: Math.round(16 * scale),
-    b: Math.round(20 * scale),
-  };
-  const plotW = width - pad.l - pad.r;
-  const plotH = height - pad.t - pad.b;
-  const barW = plotW / keys.length;
-  const countFont = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
-
-  keys.forEach((key, i) => {
-    const val = values[i];
-    const bh = (val / maxVal) * plotH;
-    const x = pad.l + i * barW + barW * 0.12;
-    const w = barW * 0.76;
-    metricsEntryCtx.fillStyle = "rgba(214, 238, 106, 0.85)";
-    metricsEntryCtx.fillRect(x, pad.t + plotH - bh, w, bh);
-    const cx = pad.l + i * barW + barW / 2;
-    metricsEntryCtx.font = countFont;
-    metricsEntryCtx.fillStyle = "rgba(244, 241, 232, 0.95)";
-    metricsEntryCtx.textAlign = "center";
-    metricsEntryCtx.textBaseline = "bottom";
-    metricsEntryCtx.fillText(String(val), cx, pad.t + plotH - bh - 2);
-  });
-
-  metricsEntryCtx.fillStyle = "rgba(163, 158, 145, 0.9)";
-  metricsEntryCtx.font = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
-  metricsEntryCtx.textAlign = "center";
-  metricsEntryCtx.textBaseline = "alphabetic";
-  keys.forEach((key, i) => {
-    if (keys.length > 6 && i % 2 === 1) return;
-    const x = pad.l + i * barW + barW / 2;
-    metricsEntryCtx.fillText(formatAxisTime(key), x, height - 3);
-  });
+  const data = buildEntryTimeline();
+  refreshEntriesCaption(data);
+  if (!data) {
+    metricsEntryCtx.clearRect(0, 0, metricsEntries.width, metricsEntries.height);
+    return;
+  }
+  const color = zones.length === 1 ? zoneColor(zones[0]) : "#d6ee6a";
+  const style = state.chartStyles?.entries || "bar";
+  let ok = false;
+  if (style === "line" || style === "area") {
+    ok = drawStyledTimeSeries(
+      metricsEntries,
+      metricsEntryCtx,
+      data.series,
+      color,
+      style,
+      formatAxisTime
+    );
+  } else {
+    ok = drawStyledBuckets(
+      metricsEntries,
+      metricsEntryCtx,
+      data.labels,
+      data.values,
+      color,
+      style,
+      { yAxis: true, yLabel: "entries / window", maxBarWidthRatio: 0.12 }
+    );
+  }
+  if (!ok) metricsEntryCtx.clearRect(0, 0, metricsEntries.width, metricsEntries.height);
 }
 
 function drawDwellChart() {
   if (!metricsDwell || !metricsDwellCtx) return;
   resizeChartCanvas(metricsDwell, metricsDwell.parentElement);
-  const { width, height } = metricsDwell;
-  const scale = chartScale(metricsDwell);
-  metricsDwellCtx.clearRect(0, 0, width, height);
-
-  const counts = DWELL_BINS.map(() => 0);
-  for (const dwell of scopedDwellTimes()) {
-    for (let i = 0; i < DWELL_BINS.length; i += 1) {
-      const low = i === 0 ? 0 : DWELL_BINS[i - 1].max;
-      const high = DWELL_BINS[i].max;
-      if (high === Infinity) {
-        if (dwell >= low) counts[i] += 1;
-        break;
-      }
-      if (dwell >= low && dwell < high) {
-        counts[i] += 1;
-        break;
-      }
-    }
+  const zones = getAnalysisZones();
+  if (zones.length > 1) {
+    const rows = zones
+      .map((zone) => {
+        ensureZoneStats(zone);
+        const dwells = zone.stats?.dwellTimes || [];
+        return {
+          zone,
+          median: dwells.length ? medianOf(dwells) : 0,
+          samples: dwells.length,
+        };
+      })
+      .sort((a, b) => b.median - a.median);
+    const { width, height } = metricsDwell;
+    metricsDwellCtx.clearRect(0, 0, width, height);
+    const maxMed = Math.max(0.5, ...rows.map((r) => r.median));
+    const pad = { l: 12, r: 56, t: 10, b: 10 };
+    const rowH = (height - pad.t - pad.b) / rows.length;
+    const barH = Math.max(4, rowH * 0.62);
+    const plotW = width - pad.l - pad.r;
+    const scale = chartScale(metricsDwell);
+    rows.forEach((row, i) => {
+      const y = pad.t + i * rowH + (rowH - barH) / 2;
+      const barW = Math.max(2, (row.median / maxMed) * plotW);
+      metricsDwellCtx.fillStyle = rgbaFromHex(zoneColor(row.zone), 0.9);
+      metricsDwellCtx.fillRect(pad.l, y, barW, barH);
+      metricsDwellCtx.fillStyle = "rgba(244, 241, 232, 0.92)";
+      metricsDwellCtx.font = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
+      metricsDwellCtx.textAlign = "left";
+      metricsDwellCtx.textBaseline = "middle";
+      const label = `${row.zone.name} · ${row.median.toFixed(1)}s med (${row.samples})`;
+      metricsDwellCtx.fillText(label, pad.l + barW + 8, y + barH / 2);
+    });
+    return;
   }
-  const total = counts.reduce((a, b) => a + b, 0);
-  if (!total) return;
-
-  const maxVal = Math.max(1, ...counts);
-  const pad = {
-    l: Math.round(8 * scale),
-    r: Math.round(8 * scale),
-    t: Math.round(16 * scale),
-    b: Math.round(22 * scale),
-  };
-  const plotW = width - pad.l - pad.r;
-  const plotH = height - pad.t - pad.b;
-  const barW = plotW / counts.length;
-  const countFont = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
-
-  counts.forEach((val, i) => {
-    const bh = val > 0 ? (val / maxVal) * plotH : 0;
-    const x = pad.l + i * barW + barW * 0.15;
-    const w = barW * 0.7;
-    const cx = pad.l + i * barW + barW / 2;
-    if (val > 0) {
-      metricsDwellCtx.fillStyle = "rgba(122, 215, 240, 0.85)";
-      metricsDwellCtx.fillRect(x, pad.t + plotH - bh, w, bh);
-    }
-    metricsDwellCtx.font = countFont;
-    metricsDwellCtx.fillStyle = "rgba(244, 241, 232, 0.95)";
-    metricsDwellCtx.textAlign = "center";
-    metricsDwellCtx.textBaseline = "bottom";
-    const labelY = val > 0 ? pad.t + plotH - bh - 2 : pad.t + plotH - 2;
-    metricsDwellCtx.fillText(String(val), cx, labelY);
-  });
-
-  metricsDwellCtx.fillStyle = "rgba(163, 158, 145, 0.85)";
-  metricsDwellCtx.font = `${Math.round(11 * scale)}px ui-sans-serif, system-ui, sans-serif`;
-  metricsDwellCtx.textAlign = "center";
-  metricsDwellCtx.textBaseline = "alphabetic";
-  DWELL_BINS.forEach((bin, i) => {
-    const x = pad.l + i * barW + barW / 2;
-    metricsDwellCtx.fillText(bin.label, x, height - 4);
-  });
+  const { labels, values, total } = dwellBucketData();
+  if (!total) {
+    metricsDwellCtx.clearRect(0, 0, metricsDwell.width, metricsDwell.height);
+    return;
+  }
+  const color = zones.length === 1 ? zoneColor(zones[0]) : "#7ad7f0";
+  const style = state.chartStyles?.dwell || "bar";
+  const ok = drawStyledBuckets(
+    metricsDwell,
+    metricsDwellCtx,
+    labels,
+    values,
+    color,
+    style,
+    { yAxis: true, yLabel: "people", maxBarWidthRatio: 0.22 }
+  );
+  if (!ok) metricsDwellCtx.clearRect(0, 0, metricsDwell.width, metricsDwell.height);
 }
 
 function drawZonesCompareChart() {
@@ -2135,83 +3279,12 @@ function refreshZonesMetricsPanel() {
   }
 }
 
-function gaitSummaryLine(serverId, features, match) {
-  const labelId = displayTrackId(serverId);
-  if (!features) return `#${labelId} — collecting steps…`;
-  const pace = formatGaitPace(features.meanSpeed);
-  const cadence = formatCadence(features.cadenceHz);
-  let line = `#${labelId} · ${pace} · ${cadence}`;
-  if (labelId !== serverId) {
-    line += " · returned";
-  } else if (match && !match.fromArchive) {
-    line += ` · ${Math.round(match.score * 100)}% like #${match.priorId}`;
-  }
-  return line;
-}
-
 function refreshGaitPanel() {
-  if (gaitSelectedSummary) {
-    if (state.selectedId != null && state.tracks.has(state.selectedId)) {
-      const f = state.gait.profiles.get(state.selectedId)?.features;
-      const match = state.gait.matches.get(state.selectedId);
-      gaitSelectedSummary.textContent = gaitSummaryLine(state.selectedId, f, match);
-    } else {
-      gaitSelectedSummary.textContent = "Click someone on the video to inspect their walk.";
-    }
-  }
-
-  const ids = [...state.gait.profiles.keys()].sort((a, b) => a - b);
-  const signature = ids
-    .map((id) => {
-      const f = state.gait.profiles.get(id)?.features;
-      const m = state.gait.matches.get(id);
-      return `${id}:${f?.n || 0}:${m?.priorId || ""}:${m?.score || 0}`;
-    })
-    .join("|");
-  if (signature !== state.gait.listSignature) {
-    state.gait.listSignature = signature;
-    if (gaitTrackList) {
-      gaitTrackList.replaceChildren();
-      if (!ids.length) {
-        const li = document.createElement("li");
-        li.className = "gait-empty";
-        li.textContent = "Tracking walks… need a few seconds of movement per person.";
-        gaitTrackList.append(li);
-      } else {
-        for (const id of ids) {
-          const f = state.gait.profiles.get(id)?.features;
-          const match = state.gait.matches.get(id);
-          const li = document.createElement("li");
-          li.className = "gait-track-item";
-          if (state.selectedId === id) li.classList.add("active");
-          li.textContent = gaitSummaryLine(id, f, match);
-          gaitTrackList.append(li);
-        }
-      }
-    }
-  }
-
-  if (gaitMatchList) {
-    gaitMatchList.replaceChildren();
-    const rows = [...state.gait.matches.entries()].sort((a, b) => b[1].score - a[1].score);
-    if (!rows.length) {
-      const li = document.createElement("li");
-      li.className = "gait-empty";
-      li.textContent = "When someone leaves and returns, we compare movement style here.";
-      gaitMatchList.append(li);
-    } else {
-      for (const [id, match] of rows) {
-        const li = document.createElement("li");
-        li.className = "gait-match-item";
-        const labelId = displayTrackId(id);
-        if (labelId !== id) {
-          li.textContent = `#${labelId} returned (${Math.round(match.score * 100)}% same walk as before)`;
-        } else {
-          li.textContent = `#${id} may match earlier #${match.priorId} (${Math.round(match.score * 100)}% similar walk)`;
-        }
-        gaitMatchList.append(li);
-      }
-    }
+  if (!gaitSelectedSummary) return;
+  if (state.selectedId != null && state.tracks.has(state.selectedId)) {
+    gaitSelectedSummary.textContent = `Following person #${displayTrackId(state.selectedId)}.`;
+  } else {
+    gaitSelectedSummary.textContent = "Click someone on the video to follow them.";
   }
 }
 
@@ -2282,6 +3355,7 @@ function clearZones() {
   state.zones = [];
   state.zoneDraft = null;
   state.highlightZoneId = null;
+  state.editingZoneId = null;
   state.metricsZoneId = null;
   state.metricsZoneView = null;
   state.metricsSelectedZoneIds = [];
@@ -2289,9 +3363,13 @@ function clearZones() {
   zoneDragPointer = null;
   zoneListSignature = "";
   zoneMenuSignature = "";
+  combineMenuSignature = "";
+  analysisScopeSignature = "";
   if (zoneList) zoneList.replaceChildren();
   syncZoneControls();
   syncMetricsPickStep();
+  state.inspectorZonesOpen = false;
+  syncInspector();
   scheduleSaveSettings();
 }
 
@@ -2309,7 +3387,11 @@ function rectToCorners(x, y, w, h) {
 }
 
 function ensureZoneCorners(zone) {
-  if (zone.corners?.length === 4) return zone.corners;
+  if (zone.shape === "circle") {
+    syncCircleBounds(zone);
+    return zone.corners;
+  }
+  if (zone.corners?.length >= 3) return zone.corners;
   const x = zone.x ?? 0;
   const y = zone.y ?? 0;
   const w = zone.w ?? 0.1;
@@ -2336,14 +3418,43 @@ function syncZoneAabb(zone) {
   zone.h = Math.max(0.01, maxY - minY);
 }
 
+function syncCircleBounds(zone) {
+  zone.x = zone.cx - zone.rx;
+  zone.y = zone.cy - zone.ry;
+  zone.w = Math.max(0.01, zone.rx * 2);
+  zone.h = Math.max(0.01, zone.ry * 2);
+  zone.corners = rectToCorners(zone.x, zone.y, zone.w, zone.h);
+}
+
 function zoneCorners(zone) {
-  if (zone.corners?.length === 4) return zone.corners;
+  if (zone.shape === "circle") {
+    syncCircleBounds(zone);
+    return zone.corners;
+  }
+  if (zone.corners?.length >= 3) return zone.corners;
   return rectToCorners(zone.x, zone.y, zone.w, zone.h);
 }
 
 function mapPoint(nx, ny, rect) {
   const x = state.mirror ? 1 - nx : nx;
   return { px: rect.x + x * rect.w, py: rect.y + ny * rect.h };
+}
+
+function pointsAreClose(a, b, cssPx = 16) {
+  const rect = contentRect();
+  if (!rect || !a || !b) return false;
+  const dpr = overlay.width / Math.max(stage.clientWidth, 1);
+  const dx = (a.x - b.x) * rect.w;
+  const dy = (a.y - b.y) * rect.h;
+  return Math.hypot(dx, dy) <= cssPx * dpr;
+}
+
+function nearDrawnPoint(px, py, stored, cssPx = 16) {
+  const rect = contentRect();
+  if (!rect || !stored) return false;
+  const dpr = overlay.width / Math.max(stage.clientWidth, 1);
+  const drawn = mapPoint(stored.x, stored.y, rect);
+  return Math.hypot(px - drawn.px, py - drawn.py) <= cssPx * dpr;
 }
 
 function pointInPolygon(nx, ny, corners) {
@@ -2359,6 +3470,15 @@ function pointInPolygon(nx, ny, corners) {
   return inside;
 }
 
+function pointInZone(nx, ny, zone) {
+  if (zone?.shape === "circle" && zone.rx > 0 && zone.ry > 0) {
+    const dx = (nx - zone.cx) / zone.rx;
+    const dy = (ny - zone.cy) / zone.ry;
+    return dx * dx + dy * dy <= 1;
+  }
+  return pointInPolygon(nx, ny, zoneCorners(zone));
+}
+
 function zoneCentroid(corners) {
   let sx = 0;
   let sy = 0;
@@ -2370,14 +3490,13 @@ function zoneCentroid(corners) {
 }
 
 function personInZone(box, zone) {
-  const corners = zoneCorners(zone);
   const samples = [
     [box.x + box.w * 0.5, box.y + box.h * 0.92],
     [box.x + box.w * 0.5, box.y + box.h * 0.78],
     [box.x + box.w * 0.15, box.y + box.h * 0.9],
     [box.x + box.w * 0.85, box.y + box.h * 0.9],
   ];
-  return samples.some(([nx, ny]) => pointInPolygon(nx, ny, corners));
+  return samples.some(([nx, ny]) => pointInZone(nx, ny, zone));
 }
 
 function overlayPointFromEvent(event) {
@@ -2393,21 +3512,46 @@ function overlayPointFromEvent(event) {
 }
 
 function cornerHandleHit(event) {
-  if (state.zoneMode || state.highlightZoneId == null || !state.running) return null;
-  const zone = zoneById(state.highlightZoneId);
+  if (state.zoneMode || !state.running) return null;
+  const zone =
+    (state.editingZoneId != null && zoneById(state.editingZoneId)) ||
+    (state.highlightZoneId != null && zoneById(state.highlightZoneId));
   if (!zone) return null;
   const hit = overlayPointFromEvent(event);
   if (!hit) return null;
   const dpr = overlay.width / Math.max(stage.clientWidth, 1);
   const hitR = 13 * dpr;
-  const corners = ensureZoneCorners(zone);
-  for (let i = 0; i < corners.length; i += 1) {
-    const { px, py } = mapPoint(corners[i].x, corners[i].y, hit.rect);
+  const handles = zone.shape === "circle" ? circleHandlePoints(zone) : ensureZoneCorners(zone);
+  for (let i = 0; i < handles.length; i += 1) {
+    const { px, py } = mapPoint(handles[i].x, handles[i].y, hit.rect);
     if (Math.hypot(hit.px - px, hit.py - py) <= hitR) {
-      return { zone, cornerIndex: i };
+      return { zone, cornerIndex: i, circle: zone.shape === "circle" };
     }
   }
   return null;
+}
+
+function shiftZone(zone, dx, dy, origin) {
+  if (zone.shape === "circle") {
+    zone.cx = clamp(origin.cx + dx, 0, 1);
+    zone.cy = clamp(origin.cy + dy, 0, 1);
+    syncCircleBounds(zone);
+    return;
+  }
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  for (const c of origin.corners) {
+    minX = Math.min(minX, c.x);
+    maxX = Math.max(maxX, c.x);
+    minY = Math.min(minY, c.y);
+    maxY = Math.max(maxY, c.y);
+  }
+  const adx = clamp(dx, -minX, 1 - maxX);
+  const ady = clamp(dy, -minY, 1 - maxY);
+  zone.corners = origin.corners.map((c) => ({ x: c.x + adx, y: c.y + ady }));
+  syncZoneAabb(zone);
 }
 
 function boxAtTime(track, now) {
@@ -2446,17 +3590,20 @@ function rgbaFromHex(hex, alpha) {
 }
 
 function syncZoneControls() {
-  if (!zoneModeBtn || !zoneClearBtn) return;
-  zoneModeBtn.classList.toggle("active", state.zoneMode);
-  zoneModeBtn.textContent = state.zoneMode ? "Drawing zone…" : "Draw zone";
-  zoneClearBtn.disabled = state.zones.length === 0;
-  stage.classList.toggle("zone-mode", state.zoneMode);
+  if (drawBoxBtn) drawBoxBtn.classList.toggle("active", state.zoneMode && state.zoneShape === "box");
+  if (drawLineBtn) drawLineBtn.classList.toggle("active", state.zoneMode && state.zoneShape === "line");
+  if (zoneClearBtn) zoneClearBtn.disabled = state.zones.length === 0;
+  if (stage) stage.classList.toggle("zone-mode", state.zoneMode);
   if (zoneHint) {
     zoneHint.hidden = state.zoneMode;
   }
 }
 
 function setZoneMode(on) {
+  const analyticsZonePick =
+    metricsPanelActive() && state.analyticsStep === "zones" && inspectorMode() === "charts";
+  if (on && !analyticsZonePick) setInspectorZonesOpen(true);
+  if (on && analyticsZonePick) state.inspectorZonesOpen = false;
   state.zoneMode = on;
   if (!on) {
     state.zoneDraft = null;
@@ -2465,23 +3612,28 @@ function setZoneMode(on) {
   syncZoneControls();
 }
 
-function toggleZoneMode() {
+function startDraw(shape) {
   if (!state.running) return;
-  if (state.zoneMode) setZoneMode(false);
-  else {
-    if (state.zones.length >= MAX_ZONES) {
-      showSourceError(`Maximum ${MAX_ZONES} zones. Remove one to add another.`);
-      return;
-    }
-    showSourceError("");
-    setZoneMode(true);
+  if (state.zoneMode && state.zoneShape === shape) {
+    setZoneMode(false);
+    return;
   }
+  if (state.zones.length >= MAX_ZONES) {
+    showSourceError(`Maximum ${MAX_ZONES} zones. Remove one to add another.`);
+    return;
+  }
+  showSourceError("");
+  state.zoneDraft = null;
+  state.editingZoneId = null;
+  state.zoneShape = shape;
+  setZoneMode(true);
 }
 
 function removeZone(id) {
   state.zones = state.zones.filter((z) => z.id !== id);
   state.metricsSelectedZoneIds = state.metricsSelectedZoneIds.filter((zid) => zid !== id);
   if (state.highlightZoneId === id) state.highlightZoneId = null;
+  if (state.editingZoneId === id) state.editingZoneId = null;
   if (state.metricsZoneId === id) state.metricsZoneId = null;
   if (state.metricsSelectedZoneIds.length === 0) {
     if (state.zones.length === 0) {
@@ -2500,10 +3652,11 @@ function removeZone(id) {
   zoneMenuSignature = "";
   updateZoneListUi(performance.now());
   syncZoneControls();
-  if (!panelMetrics.hidden) {
+  if (metricsPanelActive()) {
     if (state.metricsScopeStep === "main") refreshMetrics();
     else syncMetricsPickStep();
   }
+  syncInspector();
   scheduleSaveSettings();
 }
 
@@ -2514,21 +3667,95 @@ function addZoneFromDraft(draft) {
     setZoneMode(false);
     return;
   }
-  const placed = placeBox(draft.x, draft.y, draft.w, draft.h);
   const id = state.zoneNextId++;
-  const zone = {
-    id,
-    ...placed,
-    corners: rectToCorners(placed.x, placed.y, placed.w, placed.h),
-    name: `Zone ${state.zones.length + 1}`,
-    color: ZONE_COLORS[(id - 1) % ZONE_COLORS.length],
-  };
+  let zone;
+  if (draft.shape === "circle") {
+    zone = {
+      id,
+      shape: "circle",
+      cx: draft.cx,
+      cy: draft.cy,
+      rx: draft.rx,
+      ry: draft.ry,
+      name: `Zone ${state.zones.length + 1}`,
+      color: ZONE_COLORS[(id - 1) % ZONE_COLORS.length],
+    };
+    syncCircleBounds(zone);
+  } else {
+    const placed = placeBox(draft.x, draft.y, draft.w, draft.h);
+    zone = {
+      id,
+      shape: "box",
+      ...placed,
+      corners: rectToCorners(placed.x, placed.y, placed.w, placed.h),
+      name: `Zone ${state.zones.length + 1}`,
+      color: ZONE_COLORS[(id - 1) % ZONE_COLORS.length],
+    };
+  }
   initZoneMetrics(zone);
   state.zones.push(zone);
   zoneMenuSignature = "";
+  combineMenuSignature = "";
   syncZoneControls();
   setZoneMode(false);
-  selectZone(zone);
+  state.analyticsStep = "zones";
+  handleVideoZonePick(zone);
+  emitTrackerUi();
+  scheduleSaveSettings();
+}
+
+function addLinePoint(nx, ny, px, py) {
+  const point = { x: clamp(nx, 0, 1), y: clamp(ny, 0, 1) };
+  const draft = state.zoneDraft;
+  if (!draft || draft.shape !== "line") {
+    state.zoneDraft = { shape: "line", points: [point], cursor: point };
+    return;
+  }
+  const start = draft.points[0];
+  if (draft.points.length >= 3 && nearDrawnPoint(px, py, start)) {
+    finishLineZone();
+    return;
+  }
+  const last = draft.points[draft.points.length - 1];
+  if (pointsAreClose(point, last, 8)) return;
+  draft.points.push(point);
+  draft.cursor = point;
+  if (draft.points.length >= 16) finishLineZone();
+}
+
+function finishLineZone() {
+  const draft = state.zoneDraft;
+  if (!draft || draft.shape !== "line" || draft.points.length < 3) return;
+  if (state.zones.length >= MAX_ZONES) {
+    showSourceError(`Maximum ${MAX_ZONES} zones.`);
+    setZoneMode(false);
+    return;
+  }
+  const corners = draft.points.map((p) => ({ x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) }));
+  if (pointsAreClose(corners[0], corners[corners.length - 1])) corners.pop();
+  if (corners.length < 3) return;
+  const id = state.zoneNextId++;
+  const zone = {
+    id,
+    shape: "line",
+    corners,
+    name: `Zone ${state.zones.length + 1}`,
+    color: ZONE_COLORS[(id - 1) % ZONE_COLORS.length],
+  };
+  syncZoneAabb(zone);
+  if (zone.w < 0.015 || zone.h < 0.015) {
+    state.zoneNextId -= 1;
+    return;
+  }
+  initZoneMetrics(zone);
+  state.zones.push(zone);
+  zoneMenuSignature = "";
+  combineMenuSignature = "";
+  syncZoneControls();
+  setZoneMode(false);
+  state.analyticsStep = "zones";
+  handleVideoZonePick(zone);
+  emitTrackerUi();
   scheduleSaveSettings();
 }
 
@@ -2554,7 +3781,7 @@ function beginZoneRename(zone, titleEl, now) {
     zoneListSignature = "";
     zoneMenuSignature = "";
     updateZoneListUi(now);
-    if (!panelMetrics.hidden) {
+    if (metricsPanelActive()) {
       if (state.metricsScopeStep === "main") refreshMetrics();
       else syncMetricsPickStep();
     }
@@ -2575,7 +3802,7 @@ function updateZoneListUi(now) {
   const signature = state.zones
     .map((z) => `${z.id}:${z.name}:${countInZone(z, now)}:${z.id === state.highlightZoneId}`)
     .join("|");
-  if (signature === zoneListSignature) return;
+  if (signature === zoneListSignature && !(signature === "" && zoneList.childElementCount > 0)) return;
   zoneListSignature = signature;
 
   zoneList.replaceChildren();
@@ -2715,37 +3942,99 @@ function drawVideoTrafficHeatmap(rect) {
   ctx.restore();
 }
 
+function circleHandlePoints(zone) {
+  return [
+    { x: zone.cx + zone.rx, y: zone.cy },
+    { x: zone.cx - zone.rx, y: zone.cy },
+    { x: zone.cx, y: zone.cy - zone.ry },
+    { x: zone.cx, y: zone.cy + zone.ry },
+  ];
+}
+
+function resizeCircleToPoint(zone, nx, ny) {
+  const rect = contentRect();
+  const rw = rect?.w || 1;
+  const rh = rect?.h || 1;
+  const radius = Math.hypot((nx - zone.cx) * rw, (ny - zone.cy) * rh);
+  const rx = radius / rw;
+  const ry = radius / rh;
+  if (rx < 0.012 || ry < 0.012) return;
+  zone.rx = rx;
+  zone.ry = ry;
+  syncCircleBounds(zone);
+}
+
 function drawZoneShape(rect, zone, { draft = false, highlight = false, count = null } = {}) {
-  const corners = zoneCorners(zone);
   const dpr = overlay.width / Math.max(stage.clientWidth, 1);
-  const color = zoneColor(zone);
+  const color = zone.color || (draft ? "#f0e07a" : zoneColor(zone));
   ctx.save();
   ctx.beginPath();
-  corners.forEach((c, i) => {
-    const { px, py } = mapPoint(c.x, c.y, rect);
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  });
-  ctx.closePath();
-  ctx.fillStyle = draft ? "rgba(240, 224, 122, 0.16)" : rgbaFromHex(color, 0.22);
-  ctx.fill();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = (highlight || draft ? 3.5 : 2.5) * dpr;
-  ctx.setLineDash(draft ? [6 * dpr, 4 * dpr] : []);
-  ctx.stroke();
-  ctx.setLineDash([]);
+  let anchor;
+  let lineDraft = false;
+  let draftLabel = "Release to set zone";
+  if (zone.shape === "line" && Array.isArray(zone.points)) {
+    const pts = zone.points;
+    if (!pts.length) {
+      ctx.restore();
+      return;
+    }
+    lineDraft = true;
+    const last = pts[pts.length - 1];
+    const cursor = zone.cursor;
+    const drawPts = cursor && !pointsAreClose(cursor, last, 4) ? [...pts, cursor] : pts;
+    drawPts.forEach((c, i) => {
+      const { px, py } = mapPoint(c.x, c.y, rect);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    if (drawPts.length >= 3) ctx.closePath();
+    anchor = zoneCentroid(pts);
+    draftLabel = pts.length >= 3 ? "Click the first point to close" : "Click to add points";
+    ctx.fillStyle = "rgba(240, 224, 122, 0.16)";
+    if (drawPts.length >= 3) ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3.5 * dpr;
+    ctx.setLineDash([6 * dpr, 4 * dpr]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const start = mapPoint(pts[0].x, pts[0].y, rect);
+    ctx.beginPath();
+    ctx.arc(start.px, start.py, (pts.length >= 3 ? 8 : 5) * dpr, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = "#17190f";
+    ctx.stroke();
+  } else if (zone.shape === "circle" && zone.rx > 0 && zone.ry > 0) {
+    const { px, py } = mapPoint(zone.cx, zone.cy, rect);
+    ctx.ellipse(px, py, Math.max(1, zone.rx * rect.w), Math.max(1, zone.ry * rect.h), 0, 0, Math.PI * 2);
+    anchor = { x: zone.cx, y: zone.cy };
+  } else {
+    const corners = zoneCorners(zone);
+    corners.forEach((c, i) => {
+      const { px, py } = mapPoint(c.x, c.y, rect);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.closePath();
+    anchor = zoneCentroid(corners);
+  }
+  if (!lineDraft) {
+    ctx.fillStyle = draft ? "rgba(240, 224, 122, 0.16)" : rgbaFromHex(color, 0.22);
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = (highlight || draft ? 3.5 : 2.5) * dpr;
+    ctx.setLineDash(draft ? [6 * dpr, 4 * dpr] : []);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   const label =
-    count == null
-      ? draft
-        ? "Release to set zone"
-        : zone.name
-      : `${zone.name} · ${count}`;
+    count == null ? (draft ? draftLabel : zone.name) : `${zone.name} · ${count}`;
   ctx.font = `600 ${11 * dpr}px ui-sans-serif, system-ui, sans-serif`;
   const padX = 6 * dpr;
   const labelH = 18 * dpr;
   const labelW = ctx.measureText(label).width + padX * 2;
-  const anchor = zoneCentroid(corners);
   const { px: ax, py: ay } = mapPoint(anchor.x, anchor.y, rect);
   const lx = clamp(ax - labelW / 2, rect.x + 4 * dpr, rect.x + rect.w - labelW - 4 * dpr);
   const ly = clamp(ay - labelH / 2, rect.y + 4 * dpr, rect.y + rect.h - labelH - 4 * dpr);
@@ -2761,13 +4050,14 @@ function drawZoneShape(rect, zone, { draft = false, highlight = false, count = n
 }
 
 function drawZoneCornerHandles(rect, zone) {
-  if (state.zoneMode || zone.id !== state.highlightZoneId) return;
-  const corners = ensureZoneCorners(zone);
+  if (state.zoneMode) return;
+  if (zone.id !== state.editingZoneId && zone.id !== state.highlightZoneId) return;
+  const handles = zone.shape === "circle" ? circleHandlePoints(zone) : ensureZoneCorners(zone);
   const dpr = overlay.width / Math.max(stage.clientWidth, 1);
   const r = 7 * dpr;
   const color = zoneColor(zone);
   ctx.save();
-  for (const c of corners) {
+  for (const c of handles) {
     const { px, py } = mapPoint(c.x, c.y, rect);
     ctx.beginPath();
     ctx.arc(px, py, r, 0, Math.PI * 2);
@@ -2806,10 +4096,12 @@ function connect() {
 
   ws.onopen = () => {
     sendConfig();
+    refreshActiveSourceLine();
   };
 
   ws.onclose = () => {
     if (state.ws === ws) state.busy = false;
+    refreshActiveSourceLine();
     setTimeout(() => {
       if (state.ws === ws) connect();
     }, 800);
@@ -2830,7 +4122,7 @@ function connect() {
     recordZoneMetrics(data.tracks || []);
     recordHeatmap(data.tracks || []);
     recordPerformance(data.ms);
-    if (!panelMetrics.hidden) {
+    if (state.running) {
       refreshMetrics();
     }
   };
@@ -2846,14 +4138,14 @@ function ingestTracks(tracks, now) {
   const dt = state.lastPacket ? Math.max(0.016, (now - state.lastPacket) / 1000) : 0.05;
   state.lastPacket = now;
   const seen = new Set();
+  expireHeldTrails(now);
 
   for (const track of tracks) {
     seen.add(track.id);
     const current = state.tracks.get(track.id);
     if (!current) {
       const placed = placeBox(track.x, track.y, track.w, track.h);
-      const anchor = trailAnchor(placed);
-      state.trails.set(track.id, [{ x: anchor.x, y: anchor.y }]);
+      const resumed = resumeHeldTrail(track.id, placed, now);
       state.tracks.set(track.id, {
         score: track.score,
         held: track.held,
@@ -2871,7 +4163,7 @@ function ingestTracks(tracks, now) {
         vy: 0,
         renderedAt: now,
       });
-      noteTrackLife(track.id, true);
+      noteTrackLife(track.id, !resumed);
       updateGaitProfile(state.gait, track.id, placed, sessionSeconds());
       continue;
     }
@@ -2901,7 +4193,6 @@ function ingestTracks(tracks, now) {
     current.th = aimed.h;
     current.score = track.score;
     current.held = track.held;
-
     const tSec = sessionSeconds();
     const boxForGait = {
       x: current.x,
@@ -2913,12 +4204,10 @@ function ingestTracks(tracks, now) {
     tryGaitMatch(state.gait, track.id, {
       identityId: displayTrackId,
       onReappear: (newId, priorId, score) => {
-        relinkTrackIdentity(newId, priorId);
         state.gait.matches.set(newId, {
           priorId: displayTrackId(priorId),
           score,
           fromArchive: true,
-          relinked: true,
         });
         refreshGaitPanel();
       },
@@ -2926,21 +4215,49 @@ function ingestTracks(tracks, now) {
   }
 
   for (const id of [...state.tracks.keys()]) {
-    if (!seen.has(id)) {
-      if (state.selectedId === id) {
-        const history = state.trails.get(id);
-        if (history?.length) {
-          state.finishedTrail = { id, points: [...history] };
-        }
-      }
-      closeTrackLife(id);
-      closeZoneTrackForAllZones(id);
-      archiveGaitProfile(state.gait, id, sessionSeconds(), displayTrackId(id));
-      state.tracks.delete(id);
-      state.trails.delete(id);
-    }
+    if (!seen.has(id)) parkTrail(id, now);
   }
   updateFollowPopupChrome();
+}
+
+const TRAIL_HOLD_MS = 1600;
+
+function expireHeldTrails(now) {
+  for (const [id, held] of state.heldTrails) {
+    if (now - held.at < TRAIL_HOLD_MS) continue;
+    state.heldTrails.delete(id);
+    if (state.finishedTrail?.id !== id) state.trails.delete(id);
+  }
+}
+
+function parkTrail(id, now) {
+  const track = state.tracks.get(id);
+  const history = state.trails.get(id) || [];
+  state.heldTrails.set(id, {
+    serverId: id,
+    displayId: displayTrackId(id),
+    trail: history,
+    box: track ? { x: track.x, y: track.y, w: track.w, h: track.h } : null,
+    at: now,
+  });
+  if (state.selectedId === id && history.length) {
+    state.finishedTrail = { id, points: history };
+  }
+  closeTrackLife(id);
+  closeZoneTrackForAllZones(id);
+  archiveGaitProfile(state.gait, id, sessionSeconds(), displayTrackId(id));
+  state.tracks.delete(id);
+}
+
+function resumeHeldTrail(serverId, box, now) {
+  expireHeldTrails(now);
+  const held = state.heldTrails.get(serverId);
+  if (!held) return false;
+  state.heldTrails.delete(serverId);
+  const trail = held.trail?.length ? held.trail : state.trails.get(serverId);
+  if (trail?.length) state.trails.set(serverId, trail);
+  if (state.finishedTrail?.id === serverId) state.finishedTrail = null;
+  return Boolean(trail?.length);
 }
 
 function follow(track, now) {
@@ -3029,84 +4346,126 @@ function drawLabel(rect, geom, id, color) {
 }
 
 function trailAnchor(box) {
-  return { x: box.x + box.w / 2, y: box.y + box.h * 0.86 };
+  return { x: box.x + box.w / 2, y: Math.min(0.995, box.y + box.h) };
+}
+
+function correctTrailTail(history, x, y, body) {
+  const near = Math.max(0.012, body * 0.18);
+  const from = Math.max(0, history.length - 6);
+  for (let i = history.length - 2; i >= from; i -= 1) {
+    if (!history[i].soft && i < history.length - 2) continue;
+    if (Math.hypot(x - history[i].x, y - history[i].y) > near) continue;
+    let far = 0;
+    for (let j = i + 1; j < history.length; j += 1) {
+      far = Math.max(far, Math.hypot(history[j].x - history[i].x, history[j].y - history[i].y));
+    }
+    if (far > near * 1.4) {
+      history.splice(i + 1);
+      return;
+    }
+  }
 }
 
 function rememberTrail(id, box) {
-  const raw = trailAnchor(box);
-  const history = state.trails.get(id) || [];
-  if (history.sx == null) {
-    history.sx = raw.x;
-    history.sy = raw.y;
-  } else {
-    const k = 0.22;
-    history.sx += (raw.x - history.sx) * k;
-    history.sy += (raw.y - history.sy) * k;
-  }
-  const last = history[history.length - 1];
-  if (!last || Math.hypot(history.sx - last.x, history.sy - last.y) > 0.006) {
-    history.push({ x: history.sx, y: history.sy });
-    if (history.length > 320) history.shift();
+  const foot = trailAnchor(box);
+  let history = state.trails.get(id);
+  if (!history) {
+    history = [];
+    history.sx = foot.x;
+    history.sy = foot.y;
     state.trails.set(id, history);
-  }
-}
-
-function chaikin(points) {
-  if (points.length < 3) return points;
-  const next = [points[0]];
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const a = points[i];
-    const b = points[i + 1];
-    next.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 });
-    next.push({ x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 });
-  }
-  next.push(points[points.length - 1]);
-  return next;
-}
-
-function strokeSmoothPath(points) {
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  if (points.length === 2) {
-    ctx.lineTo(points[1].x, points[1].y);
-    ctx.stroke();
     return;
   }
-  for (let i = 1; i < points.length - 1; i += 1) {
-    const midX = (points[i].x + points[i + 1].x) / 2;
-    const midY = (points[i].y + points[i + 1].y) / 2;
-    ctx.quadraticCurveTo(points[i].x, points[i].y, midX, midY);
+  if (history.sx == null) {
+    history.sx = foot.x;
+    history.sy = foot.y;
   }
-  const last = points[points.length - 1];
-  ctx.lineTo(last.x, last.y);
+  const body = Math.max(box.h || 0.1, 0.05);
+  const dx = foot.x - history.sx;
+  const dy = foot.y - history.sy;
+  const dist = Math.hypot(dx, dy);
+  const pull = dist > body * 0.7 ? 0.22 : 0.5;
+  history.sx += dx * pull;
+  history.sy += dy * pull;
+  correctTrailTail(history, history.sx, history.sy, body);
+  const last = history[history.length - 1];
+  const step = last ? Math.hypot(history.sx - last.x, history.sy - last.y) : Infinity;
+  if (last && step > Math.max(0.07, body * 0.8)) {
+    const fresh = [{ x: history.sx, y: history.sy, soft: true }];
+    fresh.sx = history.sx;
+    fresh.sy = history.sy;
+    state.trails.set(id, fresh);
+    return;
+  }
+  if (!last || step > 0.004) {
+    history.push({ x: history.sx, y: history.sy, soft: true });
+    let softCount = 0;
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (!history[i].soft) break;
+      softCount += 1;
+      if (softCount > 8) history[i].soft = false;
+    }
+    if (history.length > 240) history.shift();
+  }
+}
+
+function roundTrail(points) {
+  let current = points;
+  for (let pass = 0; pass < 3 && current.length >= 3; pass += 1) {
+    const next = [current[0]];
+    for (let i = 0; i < current.length - 1; i += 1) {
+      const a = current[i];
+      const b = current[i + 1];
+      next.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 });
+      next.push({ x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 });
+    }
+    next.push(current[current.length - 1]);
+    current = next;
+  }
+  return current;
+}
+
+function strokeCurve(points) {
+  const smooth = roundTrail(points);
+  ctx.beginPath();
+  ctx.moveTo(smooth[0].x, smooth[0].y);
+  for (let i = 1; i < smooth.length - 1; i += 1) {
+    const midX = (smooth[i].x + smooth[i + 1].x) / 2;
+    const midY = (smooth[i].y + smooth[i + 1].y) / 2;
+    ctx.quadraticCurveTo(smooth[i].x, smooth[i].y, midX, midY);
+  }
+  const end = smooth[smooth.length - 1];
+  ctx.lineTo(end.x, end.y);
   ctx.stroke();
 }
 
-function drawTrail(rect, id, history, box, color = TRACK_COLOR) {
-  if (!history || history.length < 2) return;
-  const dpr = overlay.width / Math.max(stage.clientWidth, 1);
-  const points = history.map((point) => ({
-    x: mapX(point.x, 0, rect),
-    y: rect.y + point.y * rect.h,
-  }));
-  if (box) {
-    const anchor = trailAnchor(box);
-    points.push({
-      x: mapX(anchor.x, 0, rect),
-      y: rect.y + anchor.y * rect.h,
-    });
+function drawTrail(rect, history, color) {
+  const points = [];
+  for (const point of history || []) {
+    if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+      points.push({
+        x: mapX(point.x, 0, rect),
+        y: rect.y + point.y * rect.h,
+      });
+    }
   }
-  const smooth = chaikin(chaikin(points));
+  if (history?.sx != null && points.length) {
+    const tip = { x: mapX(history.sx, 0, rect), y: rect.y + history.sy * rect.h };
+    const last = points[points.length - 1];
+    if (Math.hypot(tip.x - last.x, tip.y - last.y) > 1) points.push(tip);
+  }
+  if (points.length < 2) return;
+  const dpr = overlay.width / Math.max(stage.clientWidth, 1);
   ctx.save();
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
   ctx.strokeStyle = color;
   ctx.globalAlpha = 0.35;
   ctx.lineWidth = 10 * dpr;
-  strokeSmoothPath(smooth);
+  strokeCurve(points);
   ctx.globalAlpha = 0.95;
   ctx.lineWidth = 4.5 * dpr;
-  strokeSmoothPath(smooth);
+  strokeCurve(points);
   ctx.restore();
 }
 
@@ -3132,7 +4491,7 @@ function render(now) {
   for (const [id, track] of state.tracks) {
     const box = follow(track, now);
     count += 1;
-    rememberTrail(id, box);
+    if (id === state.selectedId) rememberTrail(id, box);
     const isSelected = id === state.selectedId;
     const zone = primaryZoneForBox(box);
     const inZone = zone != null;
@@ -3147,22 +4506,23 @@ function render(now) {
       selectedBox = box;
     }
   }
-  if (state.selectedId != null) {
-    const history =
-      state.tracks.has(state.selectedId)
-        ? state.trails.get(state.selectedId)
-        : state.finishedTrail?.id === state.selectedId
-          ? state.finishedTrail.points
-          : null;
-    const selectedZone = selectedBox ? primaryZoneForBox(selectedBox) : null;
-    drawTrail(rect, state.selectedId, history, selectedBox, selectedZone ? zoneColor(selectedZone) : TRACK_COLOR);
+  if (state.selectedId != null && selectedBox) {
+    const history = state.trails.get(state.selectedId);
+    const zone = primaryZoneForBox(selectedBox);
+    drawTrail(rect, history, zone ? zoneColor(zone) : TRACK_COLOR);
   }
 
   for (const zone of state.zones) {
     ensureZoneCorners(zone);
     const inZone = countInZone(zone, now);
+    const analyticsSelected =
+      state.analyticsStep === "metrics" && state.metricsSelectedZoneIds.length > 0
+        ? new Set(state.metricsSelectedZoneIds)
+        : null;
     drawZoneShape(rect, zone, {
-      highlight: zone.id === state.highlightZoneId,
+      highlight: analyticsSelected
+        ? analyticsSelected.has(zone.id)
+        : zone.id === state.highlightZoneId,
       count: inZone,
     });
     drawZoneCornerHandles(rect, zone);
@@ -3171,9 +4531,28 @@ function render(now) {
     drawZoneShape(rect, state.zoneDraft, { draft: true });
   }
   updateZoneListUi(now);
-  syncInspector();
+  if (analysisScopeOutOfSync()) {
+    analysisScopeSignature = "";
+    syncAnalysisScopeUi();
+  }
 
   drawCrop(selected);
+
+  metricsRenderTick += 1;
+  recordCrowd(count);
+  if (metricsRenderTick % 8 === 0) {
+    recordHeatmap(
+      [...state.tracks.entries()].map(([id, tr]) => ({
+        id,
+        x: tr.x,
+        y: tr.y,
+        w: tr.w,
+        h: tr.h,
+      }))
+    );
+  }
+  maybeRefreshSummaryFromFrame(now);
+  maybeRefreshMetricsFromVideoFrame();
 }
 
 async function pump() {
@@ -3246,6 +4625,12 @@ function refreshActiveSourceLine() {
   if (!state.running || !state.sourceKind) {
     activeSourceLine.textContent =
       "No video loaded — CASIA-B / MOT17 → Use, or Open video.";
+    return;
+  }
+  const wsOk = state.ws && state.ws.readyState === WebSocket.OPEN;
+  if (!wsOk) {
+    activeSourceLine.textContent =
+      "Tracking server offline — run: .venv/bin/python -m app.main (port 8000).";
     return;
   }
   if (state.sourceKind === "camera") {
@@ -3485,7 +4870,96 @@ async function useFile(file, fromRestore = false, sourceMeta = null) {
   scheduleSaveSettings();
 }
 
+const FOLLOW_SIZE_KEY = "people-tracker-follow-size";
+const FOLLOW_HEIGHT_KEY = "people-tracker-follow-height";
+
+function applyFollowSize(width) {
+  if (!followPopup) return;
+  const dock = followPopup.closest(".inspector");
+  const hostW = dock?.clientWidth || stage?.clientWidth || 320;
+  const max = Math.max(120, Math.min(280, hostW - 24));
+  const next = clamp(width, 96, max);
+  followPopup.style.setProperty("--follow-width", `${Math.round(next)}px`);
+  clampFollowPopupPosition();
+}
+
+function applyFollowHeight(height) {
+  if (!followPopup) return;
+  const dock = followPopup.closest(".inspector");
+  const host = dock?.clientHeight || 0;
+  const max = host > 240 ? host - 200 : 720;
+  const next = clamp(height, 140, max);
+  followPopup.style.setProperty("--follow-height", `${Math.round(next)}px`);
+}
+
+function restoreFollowSize() {
+  try {
+    const saved = Number(localStorage.getItem(FOLLOW_SIZE_KEY));
+    if (Number.isFinite(saved)) applyFollowSize(saved);
+  } catch {
+    /* storage blocked */
+  }
+}
+
+function restoreFollowHeight() {
+  try {
+    const saved = Number(localStorage.getItem(FOLLOW_HEIGHT_KEY));
+    if (Number.isFinite(saved)) applyFollowHeight(saved);
+  } catch {
+    /* storage blocked */
+  }
+}
+
+function wireFollowResize(signal) {
+  const docked = Boolean(followPopup?.closest(".inspector"));
+  if (docked) restoreFollowHeight();
+  else restoreFollowSize();
+  const handle = document.getElementById("followResize");
+  if (!handle) return;
+  handle.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startW = followPopup?.offsetWidth || 128;
+      const startH = followPopup?.offsetHeight || 320;
+      const inDock = Boolean(followPopup?.closest(".inspector"));
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch {
+        /* pointer already released */
+      }
+      const move = (ev) => {
+        if (inDock) applyFollowHeight(startH - (ev.clientY - startY));
+        else applyFollowSize(startW + (ev.clientX - startX));
+      };
+      const end = () => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", end);
+        handle.removeEventListener("pointercancel", end);
+        try {
+          if (inDock) {
+            localStorage.setItem(FOLLOW_HEIGHT_KEY, String(Math.round(followPopup?.offsetHeight || 320)));
+          } else {
+            localStorage.setItem(FOLLOW_SIZE_KEY, String(followPopup?.offsetWidth || 128));
+          }
+        } catch {
+          /* storage blocked */
+        }
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", end);
+      handle.addEventListener("pointercancel", end);
+    },
+    { signal }
+  );
+}
+
 function wireUi({ signal }) {
+  wireFollowResize(signal);
   if (tabSource) tabSource.addEventListener("click", () => selectTab("source"), { signal });
   if (tabMetrics) tabMetrics.addEventListener("click", () => selectTab("metrics"), { signal });
 
@@ -3494,7 +4968,7 @@ function wireUi({ signal }) {
     btn.addEventListener(
       "click",
       () => {
-        if (panelMetrics.hidden) selectTab("metrics");
+        if (!metricsPanelActive()) selectTab("metrics");
         if (state.metricsScopeStep === "pick") return;
         showMetricsDetail(btn.dataset.metric);
       },
@@ -3547,8 +5021,162 @@ function wireUi({ signal }) {
     );
   }
 
-  if (zoneModeBtn) zoneModeBtn.addEventListener("click", toggleZoneMode, { signal });
-  if (zoneClearBtn) zoneClearBtn.addEventListener("click", clearZones, { signal });
+  const stageTools = document.getElementById("stageTools");
+  const zoneEditBtn = document.getElementById("zoneEditBtn");
+  const zoneDeleteBtn = document.getElementById("zoneDeleteBtn");
+  let menuZoneId = null;
+  const hideDrawMenu = () => stageTools?.classList.remove("is-open");
+  const showDrawMenu = (event) => {
+    if (!state.running || !stageTools || !stage) return;
+    const point = overlayPointFromEvent(event);
+    const zone = point ? zoneAtPoint(point.nx, point.ny) : null;
+    menuZoneId = zone ? zone.id : null;
+    if (zoneEditBtn) zoneEditBtn.hidden = !zone;
+    if (zoneDeleteBtn) zoneDeleteBtn.hidden = !zone;
+    const bounds = stage.getBoundingClientRect();
+    stageTools.classList.add("is-open");
+    const menuW = stageTools.offsetWidth;
+    const menuH = stageTools.offsetHeight;
+    const x = clamp(event.clientX - bounds.left, 8, Math.max(8, bounds.width - menuW - 8));
+    const y = clamp(event.clientY - bounds.top, 8, Math.max(8, bounds.height - menuH - 8));
+    stageTools.style.left = `${x}px`;
+    stageTools.style.top = `${y}px`;
+  };
+  if (drawBoxBtn) {
+    drawBoxBtn.addEventListener(
+      "click",
+      () => {
+        startDraw("box");
+        hideDrawMenu();
+      },
+      { signal }
+    );
+  }
+  if (drawLineBtn) {
+    drawLineBtn.addEventListener(
+      "click",
+      () => {
+        startDraw("line");
+        hideDrawMenu();
+      },
+      { signal }
+    );
+  }
+  if (zoneEditBtn) {
+    zoneEditBtn.addEventListener(
+      "click",
+      () => {
+        beginZoneEdit(menuZoneId);
+        hideDrawMenu();
+      },
+      { signal }
+    );
+  }
+  if (zoneDeleteBtn) {
+    zoneDeleteBtn.addEventListener(
+      "click",
+      () => {
+        if (menuZoneId != null) removeZone(menuZoneId);
+        hideDrawMenu();
+      },
+      { signal }
+    );
+  }
+  if (stage) {
+    stage.addEventListener(
+      "contextmenu",
+      (event) => {
+        if (!state.running) return;
+        event.preventDefault();
+        if (event.target.closest?.("#drawMenu")) return;
+        showDrawMenu(event);
+      },
+      { signal }
+    );
+  }
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!stageTools?.classList.contains("is-open")) return;
+      if (event.button === 2) return;
+      if (stageTools.contains(event.target)) return;
+      hideDrawMenu();
+    },
+    { signal }
+  );
+  const inspectorModeBack = document.getElementById("inspectorModeBack");
+  const inspectorZonesOpen = document.getElementById("inspectorZonesOpen");
+  if (inspectorModeBack) {
+    inspectorModeBack.addEventListener(
+      "click",
+      () => {
+        const mode = inspectorMode();
+        if (mode === "person") clearPersonSelection();
+        else if (mode === "zones") setInspectorZonesOpen(false);
+        else if (mode === "charts" && state.analyticsStep === "metrics") {
+          backToAnalyticsZoneStep();
+        }
+      },
+      { signal }
+    );
+  }
+  const analyticsChangeZones = document.getElementById("analyticsChangeZones");
+  if (analyticsChangeZones) {
+    analyticsChangeZones.addEventListener("click", () => backToAnalyticsZoneStep(), { signal });
+  }
+  const analyticsScopeNext = document.getElementById("analyticsScopeNext");
+  if (analyticsScopeNext) {
+    analyticsScopeNext.addEventListener("click", () => goToAnalyticsMetricsStep(), { signal });
+  }
+  const zoneScopeList = document.getElementById("zoneScopeList");
+  if (zoneScopeList) {
+    zoneScopeList.addEventListener(
+      "click",
+      (event) => {
+        const zoneBtn = event.target.closest("[data-zone-id]");
+        if (zoneBtn && zoneScopeList.contains(zoneBtn)) {
+          event.preventDefault();
+          toggleScopeZoneById(zoneBtn.dataset.zoneId);
+          return;
+        }
+        if (event.target.closest(".zone-scope-frame")) {
+          event.preventDefault();
+          setCombinedZones([]);
+          return;
+        }
+        if (event.target.closest(".zone-scope-all")) {
+          event.preventDefault();
+          setCombinedZones(state.zones.map((z) => Number(z.id)));
+        }
+      },
+      { signal }
+    );
+  }
+  const analysisDrawZoneBtn = document.getElementById("analysisDrawZoneBtn");
+  if (analysisDrawZoneBtn) {
+    analysisDrawZoneBtn.addEventListener(
+      "click",
+      () => {
+        state.analyticsStep = "zones";
+        startDraw("box");
+        syncInspector();
+      },
+      { signal }
+    );
+  }
+  if (inspectorZonesOpen) {
+    inspectorZonesOpen.addEventListener("click", () => setInspectorZonesOpen(true), { signal });
+  }
+  if (zoneClearBtn) {
+    zoneClearBtn.addEventListener(
+      "click",
+      () => {
+        clearZones();
+        hideDrawMenu();
+      },
+      { signal }
+    );
+  }
   if (zoneMetricsNext) zoneMetricsNext.addEventListener("click", goToMetricsMain, { signal });
   if (metricsChangeScope) metricsChangeScope.addEventListener("click", backToMetricsPick, { signal });
   if (metricsChooseZones) metricsChooseZones.addEventListener("click", backToMetricsPick, { signal });
@@ -3556,10 +5184,18 @@ function wireUi({ signal }) {
   window.addEventListener(
     "keydown",
     (event) => {
+      if (event.key === "Enter" && state.zoneMode && state.zoneShape === "line") {
+        const tag = event.target?.tagName;
+        if (tag !== "INPUT" && tag !== "TEXTAREA") finishLineZone();
+      }
       if (event.key === "Escape" && state.zoneMode) {
         state.zoneDraft = null;
         zoneDragPointer = null;
         setZoneMode(false);
+      }
+      if (event.key === "Escape") {
+        state.editingZoneId = null;
+        hideDrawMenu();
       }
     },
     { signal }
@@ -3617,6 +5253,20 @@ function wireUi({ signal }) {
       { signal }
     );
   }
+  for (const bar of document.querySelectorAll(".chart-style-bar")) {
+    bar.addEventListener(
+      "click",
+      (event) => {
+        const btn = event.target.closest("[data-chart-style]");
+        if (!btn || !bar.contains(btn)) return;
+        const key = bar.dataset.styleKey;
+        if (!key) return;
+        setChartStyle(key, btn.dataset.chartStyle);
+      },
+      { signal }
+    );
+  }
+  showExtraChart("summary");
   if (savedProfileSelect) {
     savedProfileSelect.addEventListener(
       "change",
@@ -3630,10 +5280,30 @@ function wireUi({ signal }) {
   overlay.addEventListener(
     "mousemove",
     (event) => {
+      if (state.zoneMode && state.zoneShape === "line") {
+        const point = overlayPointFromEvent(event);
+        if (point && state.zoneDraft?.shape === "line") {
+          state.zoneDraft.cursor = { x: point.nx, y: point.ny };
+          const start = state.zoneDraft.points[0];
+          overlay.style.cursor =
+            state.zoneDraft.points.length >= 3 && nearDrawnPoint(point.px, point.py, start)
+              ? "pointer"
+              : "crosshair";
+        }
+        return;
+      }
       if (state.zoneMode) return;
       if (cornerHandleHit(event)) {
         overlay.style.cursor = "grab";
         return;
+      }
+      if (state.editingZoneId != null) {
+        const point = pointFromEvent(event);
+        const zone = zoneById(state.editingZoneId);
+        if (point && zone && pointInZone(point.nx, point.ny, zone)) {
+          overlay.style.cursor = "move";
+          return;
+        }
       }
       const point = pointFromEvent(event);
       overlay.style.cursor = point && trackAt(point.nx, point.ny) ? "pointer" : "default";
@@ -3653,6 +5323,7 @@ function wireUi({ signal }) {
           pointerId: event.pointerId,
           zoneId: corner.zone.id,
           cornerIndex: corner.cornerIndex,
+          circle: Boolean(corner.circle),
         };
         try {
           overlay.setPointerCapture(event.pointerId);
@@ -3661,12 +5332,41 @@ function wireUi({ signal }) {
         }
         return;
       }
+      if (state.zoneMode && state.zoneShape === "line") {
+        const point = overlayPointFromEvent(event);
+        if (!point) return;
+        event.preventDefault();
+        addLinePoint(point.nx, point.ny, point.px, point.py);
+        return;
+      }
+      if (state.editingZoneId != null && !state.zoneMode) {
+        const hit = overlayPointFromEvent(event);
+        const zone = zoneById(state.editingZoneId);
+        if (hit && zone && pointInZone(hit.nx, hit.ny, zone)) {
+          event.preventDefault();
+          zoneMoveDidDrag = false;
+          const corners = zone.shape === "circle" ? null : ensureZoneCorners(zone).map((c) => ({ ...c }));
+          zoneMoveDrag = {
+            pointerId: event.pointerId,
+            zoneId: zone.id,
+            startNx: hit.nx,
+            startNy: hit.ny,
+            origin: zone.shape === "circle" ? { cx: zone.cx, cy: zone.cy } : { corners },
+          };
+          try {
+            overlay.setPointerCapture(event.pointerId);
+          } catch {
+            /* move still follows pointermove */
+          }
+          return;
+        }
+      }
       if (!state.zoneMode) return;
       const point = pointFromEvent(event);
       if (!point) return;
       event.preventDefault();
       zoneDragPointer = event.pointerId;
-      state.zoneDraft = zoneDraftFromAnchor(point.nx, point.ny, point.nx, point.ny);
+      state.zoneDraft = zoneDraftFromAnchor(point.nx, point.ny, point.nx, point.ny, state.zoneShape);
       try {
         overlay.setPointerCapture(event.pointerId);
       } catch {
@@ -3684,14 +5384,27 @@ function wireUi({ signal }) {
         if (!hit) return;
         const zone = zoneById(zoneCornerDrag.zoneId);
         if (!zone) return;
-        const corners = ensureZoneCorners(zone);
-        corners[zoneCornerDrag.cornerIndex] = {
-          x: clamp(hit.nx, 0, 1),
-          y: clamp(hit.ny, 0, 1),
-        };
-        syncZoneAabb(zone);
+        if (zoneCornerDrag.circle || zone.shape === "circle") {
+          resizeCircleToPoint(zone, hit.nx, hit.ny);
+        } else {
+          const corners = ensureZoneCorners(zone);
+          corners[zoneCornerDrag.cornerIndex] = {
+            x: clamp(hit.nx, 0, 1),
+            y: clamp(hit.ny, 0, 1),
+          };
+          syncZoneAabb(zone);
+        }
         zoneListSignature = "";
         zoneCornerDidDrag = true;
+        return;
+      }
+      if (zoneMoveDrag?.pointerId === event.pointerId) {
+        const hit = overlayPointFromEvent(event);
+        const zone = zoneById(zoneMoveDrag.zoneId);
+        if (!hit || !zone) return;
+        shiftZone(zone, hit.nx - zoneMoveDrag.startNx, hit.ny - zoneMoveDrag.startNy, zoneMoveDrag.origin);
+        zoneListSignature = "";
+        zoneMoveDidDrag = true;
         return;
       }
       if (zoneDragPointer !== event.pointerId || !state.zoneDraft) return;
@@ -3701,7 +5414,8 @@ function wireUi({ signal }) {
         state.zoneDraft.anchorX,
         state.zoneDraft.anchorY,
         point.nx,
-        point.ny
+        point.ny,
+        state.zoneDraft.shape || state.zoneShape
       );
     },
     { signal }
@@ -3717,6 +5431,14 @@ function wireUi({ signal }) {
         zoneCornerDrag = null;
         zoneMenuSignature = "";
         scheduleSaveSettings();
+        return;
+      }
+      if (zoneMoveDrag?.pointerId === event.pointerId) {
+        if (overlay.hasPointerCapture(event.pointerId)) {
+          overlay.releasePointerCapture(event.pointerId);
+        }
+        zoneMoveDrag = null;
+        if (zoneMoveDidDrag) scheduleSaveSettings();
         return;
       }
       if (zoneDragPointer !== event.pointerId) return;
@@ -3735,9 +5457,26 @@ function wireUi({ signal }) {
         zoneCornerDrag = null;
         return;
       }
+      if (zoneMoveDrag?.pointerId === event.pointerId) {
+        zoneMoveDrag = null;
+        return;
+      }
       if (zoneDragPointer !== event.pointerId) return;
       zoneDragPointer = null;
       state.zoneDraft = null;
+    },
+    { signal }
+  );
+
+  overlay.addEventListener(
+    "dblclick",
+    (event) => {
+      if (!state.zoneMode || state.zoneShape !== "line" || !state.zoneDraft?.points) return;
+      const pts = state.zoneDraft.points;
+      if (pts.length >= 2 && pointsAreClose(pts[pts.length - 1], pts[pts.length - 2], 10)) {
+        pts.pop();
+      }
+      finishLineZone();
     },
     { signal }
   );
@@ -3750,21 +5489,39 @@ function wireUi({ signal }) {
         zoneCornerDidDrag = false;
         return;
       }
+      if (zoneMoveDidDrag) {
+        zoneMoveDidDrag = false;
+        return;
+      }
       const point = pointFromEvent(event);
       if (!point) return;
       const zoneHit = zoneAtPoint(point.nx, point.ny);
       const hit = trackAt(point.nx, point.ny);
-      if (zoneHit && hit == null) {
+      if (hit != null) {
+        state.finishedTrail = null;
+        state.inspectorZonesOpen = false;
+        state.selectedId = hit === state.selectedId ? null : hit;
+        updateFollowPopupChrome();
+        refreshGaitPanel();
+        syncInspector();
+        return;
+      }
+      if (zoneHit && metricsPanelActive() && state.analyticsStep === "zones") {
+        handleVideoZonePick(zoneHit);
+        return;
+      }
+      if (zoneHit) {
         selectZone(zoneHit);
         return;
       }
-      if (hit == null || hit === state.selectedId) {
-        selectFrame();
-      } else {
+      if (state.selectedId != null) {
+        state.selectedId = null;
         state.finishedTrail = null;
-        state.selectedId = hit;
         updateFollowPopupChrome();
-        refreshGaitPanel();
+      }
+      if (metricsPanelActive() && state.analyticsStep === "zones" && state.zones.length) {
+        combineMenuSignature = "";
+        syncCombineMenu();
         syncInspector();
       }
     },
@@ -3776,6 +5533,7 @@ function wireUi({ signal }) {
       "pointerdown",
       (event) => {
         if (event.button !== 0 || event.target === followPopupClose) return;
+        if (followPopup?.closest(".inspector")) return;
         event.preventDefault();
         event.stopPropagation();
         clampFollowPopupPosition();
@@ -3890,14 +5648,16 @@ function selectZone(zone) {
   state.selectedId = null;
   state.finishedTrail = null;
   updateFollowPopupChrome();
-  state.highlightZoneId = zone.id;
-  state.metricsScopeStep = "main";
-  state.metricsNavStep = "detail";
-  combineMenuSignature = "";
-  setMetricsZoneId(zone.id);
-  zoneListSignature = "";
+  setCombinedZones([zone.id]);
   updateZoneListUi(performance.now());
-  syncInspector();
+}
+
+function beginZoneEdit(id) {
+  const zone = zoneById(id);
+  if (!zone) return;
+  setZoneMode(false);
+  state.editingZoneId = zone.id;
+  state.highlightZoneId = zone.id;
 }
 
 function selectFrame() {
@@ -3917,28 +5677,52 @@ function selectFrame() {
   syncInspector();
 }
 
+function setInspectorZonesOpen(open) {
+  state.inspectorZonesOpen = !!open;
+  if (open && followSelectionActive()) {
+    state.selectedId = null;
+    state.finishedTrail = null;
+    updateFollowPopupChrome();
+  }
+  syncInspector();
+}
+
+function setPaneShown(el, show) {
+  if (!el) return;
+  el.hidden = !show;
+  if (show) el.style.removeProperty("display");
+  else el.style.setProperty("display", "none", "important");
+}
+
 function syncInspector() {
-  const frameEl = document.getElementById("inspectorFrame");
+  if (metricsPanelActive() && state.analyticsStep === "zones") {
+    state.inspectorZonesOpen = false;
+  }
+  const mode = inspectorMode();
+  const bodyEl = document.getElementById("inspectorBody");
+  const chartsDock = document.getElementById("chartsDock");
+  const modeBack = document.getElementById("inspectorModeBack");
+  const modeTitle = document.getElementById("inspectorModeTitle");
+  const zonesOpenBtn = document.getElementById("inspectorZonesOpen");
   const zoneEl = document.getElementById("inspectorZone");
   const personEl = document.getElementById("inspectorPerson");
-  if (!frameEl) return;
   const person = followSelectionActive();
   const zone = zoneById(state.highlightZoneId);
-  const showZone = !person && !!zone;
-  frameEl.hidden = Boolean(person || showZone);
+  const zonesListOpen = mode === "zones";
+  const showZone = zonesListOpen && !!zone;
   if (zoneEl) zoneEl.hidden = !showZone;
-  if (personEl) personEl.hidden = !person;
-
-  const nowEl = document.getElementById("statNow");
-  if (nowEl) nowEl.textContent = state.running ? String(state.tracks.size) : "—";
+  if (personEl) personEl.hidden = mode !== "person";
 
   const scope = document.getElementById("chartScope");
   const combined = state.metricsZoneView === "multi" ? getSelectedZones() : [];
   if (scope) {
-    if (combined.length > 1) scope.textContent = combined.map((z) => z.name).join(", ");
-    else {
-      const chartZone = state.metricsZoneView === "zone" ? activeMetricsZone() : null;
-      scope.textContent = chartZone ? chartZone.name : "Whole frame";
+    const analysisZones = getAnalysisZones();
+    if (analysisZones.length > 1) {
+      scope.textContent = analysisZones.map((z) => z.name).join(" vs ");
+    } else if (analysisZones.length === 1) {
+      scope.textContent = analysisZones[0].name;
+    } else {
+      scope.textContent = "Whole frame";
     }
   }
 
@@ -3955,8 +5739,50 @@ function syncInspector() {
   }
 
   const zonesBlock = document.getElementById("inspectorZones");
-  if (zonesBlock) zonesBlock.hidden = state.zones.length === 0;
-  syncCombineMenu();
+  if (zonesBlock) zonesBlock.hidden = !zonesListOpen;
+
+  if (bodyEl) bodyEl.hidden = mode === "charts";
+  if (chartsDock) chartsDock.hidden = mode !== "charts";
+
+  const onZonePickStep = mode === "charts" && state.analyticsStep === "zones";
+  const onMetricsStep = mode === "charts" && state.analyticsStep === "metrics";
+
+  const chartsPanel = document.getElementById("chartsPanel");
+  setPaneShown(chartsPanel, onMetricsStep);
+  setPaneShown(document.getElementById("analysisScope"), onZonePickStep);
+
+  if (panelMetrics) {
+    panelMetrics.hidden = !onMetricsStep || mode !== "charts";
+  }
+
+  const showModeBack =
+    mode === "person" || mode === "zones" || onMetricsStep;
+  if (modeBack) modeBack.hidden = !showModeBack;
+
+  if (modeTitle) {
+    if (mode === "person") {
+      modeTitle.textContent = followPopupLabel?.textContent?.trim() || "Person";
+    } else if (mode === "zones") {
+      modeTitle.textContent = "Zones";
+    } else if (onZonePickStep) {
+      const n = state.zones.length;
+      modeTitle.textContent = n ? `Which zones? (${n} on video)` : "Which zones?";
+    } else {
+      modeTitle.textContent = "Analytics";
+    }
+  }
+
+  const showZonesBtn = (onMetricsStep || onZonePickStep) && state.zones.length > 0;
+  if (zonesOpenBtn) zonesOpenBtn.hidden = !showZonesBtn;
+
+  const compareTab = document.querySelector('[data-extra-tab="compare"]');
+  if (compareTab) compareTab.hidden = state.zones.length === 0;
+  if ((state.extraChart === "compare" || state.extraChart === "zones") && state.zones.length === 0) {
+    showExtraChart("summary");
+  }
+
+  syncAnalysisScopeUi();
+  syncAnalyticsScopeSummary();
 }
 
 function drawCrop(box) {
@@ -4035,8 +5861,7 @@ function zoneAtPoint(nx, ny) {
   let best = null;
   let bestArea = Infinity;
   for (const zone of state.zones) {
-    const corners = zoneCorners(zone);
-    if (!pointInPolygon(nx, ny, corners)) continue;
+    if (!pointInZone(nx, ny, zone)) continue;
     const area = Math.max(0.0001, (zone.w || 0) * (zone.h || 0));
     if (area < bestArea) {
       best = zone;
@@ -4046,12 +5871,33 @@ function zoneAtPoint(nx, ny) {
   return best;
 }
 
-function zoneDraftFromAnchor(anchorX, anchorY, nx, ny) {
+function zoneDraftFromAnchor(anchorX, anchorY, nx, ny, shape = "box") {
+  if (shape === "circle") {
+    const rect = contentRect();
+    const rw = rect?.w || 1;
+    const rh = rect?.h || 1;
+    const radius = Math.hypot((nx - anchorX) * rw, (ny - anchorY) * rh);
+    const rx = radius / rw;
+    const ry = radius / rh;
+    return {
+      shape: "circle",
+      cx: anchorX,
+      cy: anchorY,
+      rx,
+      ry,
+      x: anchorX - rx,
+      y: anchorY - ry,
+      w: rx * 2,
+      h: ry * 2,
+      anchorX,
+      anchorY,
+    };
+  }
   const x = Math.min(anchorX, nx);
   const y = Math.min(anchorY, ny);
   const w = Math.abs(nx - anchorX);
   const h = Math.abs(ny - anchorY);
-  return { x, y, w, h, anchorX, anchorY };
+  return { shape: "box", x, y, w, h, anchorX, anchorY };
 }
 
 function finishZoneDrag() {
@@ -4095,17 +5941,199 @@ function avgDetectMs() {
   return sum / state.perfHistory.length;
 }
 
+function thinHistory(history, max = 280) {
+  return downsampleSeries(history || [], max).map((point) => ({
+    t: Math.round(point.t * 10) / 10,
+    count: Math.round(point.count * 100) / 100,
+  }));
+}
+
+function snapshotChartBundle(crowdHistory, dwellTimes) {
+  const selected = getAnalysisZones();
+  const scopeLabel = analyticsScopeLabel();
+  const styles = { ...(state.chartStyles || {}) };
+  const nowCount = scopedLiveCount();
+  const lastPerf = state.perfHistory[state.perfHistory.length - 1];
+  const medDwell = dwellTimes.length ? median(dwellTimes) : null;
+  const avg = averageCrowd(crowdHistory);
+  const peak = crowdHistory.length ? Math.max(...crowdHistory.map((p) => p.count)) : null;
+  const analysis = analyzeCrowd(crowdHistory);
+
+  const occupancy =
+    selected.length > 1
+      ? {
+          multi: true,
+          style: styles.occupancy || "line",
+          series: selected.map((zone) => ({
+            label: zone.name,
+            color: zoneColor(zone),
+            history: thinHistory(sortedZoneHistory(zone)),
+          })),
+        }
+      : {
+          multi: false,
+          style: styles.occupancy || "line",
+          color: selected.length === 1 ? zoneColor(selected[0]) : "#d6ee6a",
+          history: thinHistory(crowdHistory),
+        };
+
+  let arrivals = null;
+  if (selected.length > 1) {
+    const grouped = buildMultiZoneEntryBuckets(selected);
+    if (grouped) {
+      arrivals = {
+        multi: true,
+        style: styles.entries || "bar",
+        labels: grouped.labels,
+        bucketSec: grouped.bucketSec,
+        caption: `Arrivals by zone · ${grouped.zoneSeries.map((z) => `${z.label} ${z.total}`).join(" · ")}`,
+        zoneSeries: grouped.zoneSeries.map((row) => ({
+          label: row.label,
+          color: row.color,
+          values: row.values,
+          total: row.total,
+          history: thinHistory(cumulativeEntryHistory(row.zone)),
+        })),
+      };
+    }
+  } else {
+    const timeline = buildEntryTimeline();
+    if (timeline) {
+      const color = selected.length === 1 ? zoneColor(selected[0]) : "#d6ee6a";
+      arrivals = {
+        multi: false,
+        style: styles.entries || "bar",
+        color,
+        labels: timeline.labels,
+        values: timeline.values,
+        series: timeline.series,
+        bucketSec: timeline.bucketSec,
+        caption: `${scopeLabel} · ${timeline.total} entries · ${formatBucketDuration(timeline.bucketSec)} windows · peak ${timeline.peak} at ${formatClock(timeline.peakAt)}`,
+      };
+    }
+  }
+
+  let dwell;
+  if (selected.length > 1) {
+    dwell = {
+      multi: true,
+      rows: selected
+        .map((zone) => {
+          ensureZoneStats(zone);
+          const samples = zone.stats?.dwellTimes || [];
+          return {
+            name: zone.name,
+            color: zoneColor(zone),
+            median: samples.length ? median(samples) : 0,
+            samples: samples.length,
+          };
+        })
+        .sort((a, b) => b.median - a.median),
+    };
+  } else {
+    const bins = dwellBucketData();
+    dwell = {
+      multi: false,
+      style: styles.dwell || "bar",
+      color: selected.length === 1 ? zoneColor(selected[0]) : "#7ad7f0",
+      labels: bins.labels,
+      values: bins.values,
+      total: bins.total,
+    };
+  }
+
+  const compareSource = selected.length ? selected : state.zones;
+  const compare = compareSource
+    .map((zone) => ({
+      name: zone.name,
+      color: zoneColor(zone),
+      avg: averageCrowd(sortedZoneHistory(zone)) || 0,
+    }))
+    .sort((a, b) => b.avg - a.avg);
+
+  const detectSeries = thinHistory(
+    state.perfHistory
+      .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.ms))
+      .map((p) => ({ t: p.t, count: p.ms }))
+  );
+  const fpsSeries = thinHistory(
+    state.perfHistory
+      .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.fps))
+      .map((p) => ({ t: p.t, count: p.fps }))
+  );
+
+  const summary =
+    selected.length > 1
+      ? {
+          multi: true,
+          scope: scopeLabel,
+          zones: selected.map((zone) => {
+            const stats = zoneSummaryStats(zone);
+            return {
+              name: zone.name,
+              color: zoneColor(zone),
+              now: stats.now,
+              avg: stats.avg,
+              entries: stats.entries,
+              peak: stats.peak,
+              busiest: stats.busiest,
+            };
+          }),
+        }
+      : {
+          multi: false,
+          scope: scopeLabel,
+          cards: [
+            { label: "Scope", value: scopeLabel },
+            { label: "Now in scope", value: nowCount != null ? String(nowCount) : "—" },
+            { label: "Average", value: avg != null ? avg.toFixed(1) : "—" },
+            { label: "Peak", value: peak != null ? String(Math.round(peak)) : "—" },
+            { label: "Unique seen", value: scopedUniqueCount() ? String(scopedUniqueCount()) : "—" },
+            { label: "Arrivals", value: scopedEntryTimes().length ? String(scopedEntryTimes().length) : "—" },
+            { label: "Median dwell", value: medDwell != null ? `${medDwell.toFixed(1)}s` : "—" },
+            { label: "Session", value: formatClock(sessionSeconds()) },
+            {
+              label: "Detect (avg)",
+              value: avgDetectMs() != null ? `${Math.round(avgDetectMs())} ms` : "—",
+            },
+            {
+              label: "Process rate",
+              value: lastPerf?.fps != null ? `${lastPerf.fps.toFixed(1)} fps` : "—",
+            },
+          ],
+        };
+
+  return {
+    scope: scopeLabel,
+    summary,
+    occupancy,
+    arrivals,
+    dwell,
+    compare,
+    performance: {
+      detect: detectSeries,
+      fps: fpsSeries,
+      detectStyle: styles.perf || "line",
+      fpsStyle: styles.fps || "line",
+      avgDetectMs: avgDetectMs(),
+      lastFps: lastPerf?.fps ?? null,
+      peakNote: analysis?.peakTime != null ? formatClock(analysis.peakTime) : null,
+    },
+  };
+}
+
 export function captureSessionSnapshot() {
   const durationSec = sessionSeconds();
-  const crowdHistory = sortedCrowdHistory();
+  const crowdHistory = [...scopedCrowdHistory()];
   const analysis = analyzeCrowd(crowdHistory);
   const heat = buildAveragedHeatGrid();
   const hotspot = heatmapHotspotFromGrid(heat.grid);
-  const rankedZones = rankZonesByPopulation(state.zones);
+  const reportZones = getAnalysisZones().length ? getAnalysisZones() : state.zones;
+  const rankedZones = rankZonesByPopulation(reportZones);
   const leader = rankedZones[0];
-  const entryTimes = [...state.entryTimes];
-  const dwellTimes = [...state.dwellTimes];
-  const uniqueCount = state.dwellTimes.length + state.trackLife.size;
+  const entryTimes = [...scopedEntryTimes()];
+  const dwellTimes = [...scopedDwellTimes()];
+  const uniqueCount = scopedUniqueCount();
   const walkSnap = exportGaitSnapshot(state.gait, { displayId: displayTrackId });
 
   const hasSignal =
@@ -4118,8 +6146,10 @@ export function captureSessionSnapshot() {
     return null;
   }
 
+  const charts = snapshotChartBundle(crowdHistory, dwellTimes);
+
   return {
-    v: 1,
+    v: 2,
     capturedAt: new Date().toISOString(),
     session: {
       sourceKind: state.sourceKind,
@@ -4131,6 +6161,9 @@ export function captureSessionSnapshot() {
     performance: {
       avgDetectMs: avgDetectMs(),
       sampleFps: state.packetMarks.length || null,
+      lastFps: charts.performance.lastFps,
+      detect: charts.performance.detect,
+      fps: charts.performance.fps,
     },
     crowd: {
       history: crowdHistory.map((p) => ({ t: p.t, count: p.count })),
@@ -4167,16 +6200,21 @@ export function captureSessionSnapshot() {
       heatW: HEAT_W,
       heatH: HEAT_H,
     },
-    zones: rankedZones.map(({ zone, avg, peak, personSeconds, entries }) => ({
-      id: zone.id,
-      name: zone.name,
-      color: zoneColor(zone),
-      avgInZone: avg,
-      peakInZone: peak,
-      personSeconds,
-      entries,
-      history: sortedZoneHistory(zone).map((p) => ({ t: p.t, count: p.count })),
-    })),
+    zones: rankedZones.map(({ zone, avg, peak, personSeconds, entries }) => {
+      const stats = zoneSummaryStats(zone);
+      return {
+        id: zone.id,
+        name: zone.name,
+        color: zoneColor(zone),
+        now: stats.now,
+        avgInZone: avg,
+        peakInZone: peak,
+        personSeconds,
+        entries,
+        history: thinHistory(sortedZoneHistory(zone)),
+      };
+    }),
+    charts,
     walk: walkSnap,
     insights: buildSnapshotInsights({
       durationSec,
@@ -4249,6 +6287,29 @@ function openSessionSnapshot() {
   }
 }
 
+export function reconcileTrackerDom() {
+  bindDom();
+  ctx = overlay?.getContext("2d");
+  metricsCtx = metricsChart?.getContext("2d");
+  metricsEntryCtx = metricsEntries?.getContext("2d");
+  metricsDwellCtx = metricsDwell?.getContext("2d");
+  metricsZonesCtx = metricsZonesChart?.getContext("2d");
+  metricsHeatCtx = metricsHeat?.getContext("2d");
+  metricsOccupancyCtx = metricsOccupancy?.getContext("2d");
+  metricsPerfCtx = metricsPerf?.getContext("2d");
+  metricsFpsCtx = metricsFps?.getContext("2d");
+  followPopupCtx = followPopupCanvas?.getContext("2d", { alpha: false });
+  combineMenuSignature = "";
+  zoneListSignature = "";
+  zoneMenuSignature = "";
+  syncCombineMenu();
+  syncInspector();
+  if (state.running) {
+    resize();
+    clampFollowPopupPosition();
+  }
+}
+
 export function mountPeopleTracker(options = {}) {
   snapshotNavigateHandler = options.onOpenSnapshot ?? null;
   bindDom();
@@ -4257,7 +6318,9 @@ export function mountPeopleTracker(options = {}) {
   wireUi({ signal: ac.signal });
 
   const metricsResize = () => {
-    if (!panelMetrics.hidden && state.metricsNavStep === "detail") refreshMetrics();
+    if (metricsPanelActive() && state.metricsNavStep === "detail") {
+      refreshMetrics({ forceFull: false });
+    }
   };
   stageResizeObserver = new ResizeObserver(() => {
     resize();
@@ -4279,6 +6342,9 @@ export function mountPeopleTracker(options = {}) {
   state.metricsActiveView = "overview";
   if (!state.metricsZoneView) state.metricsZoneView = "frame";
   updateChartEmptyStates();
+  combineMenuSignature = "";
+  syncCombineMenu();
+  syncInspector();
   renderActive = true;
   requestAnimationFrame(render);
   pump();

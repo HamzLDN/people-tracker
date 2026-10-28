@@ -9,6 +9,9 @@ export default defineConfig({
         target: "http://127.0.0.1:8000",
         ws: true,
       },
+      "/samples": {
+        target: "http://127.0.0.1:8000",
+      },
     },
   },
   build: {
